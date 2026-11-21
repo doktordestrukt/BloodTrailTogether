@@ -177,19 +177,21 @@ local function currentMapPath()
     return p:match("^(.-)%.[^/]+$") or p     -- /Game/Maps/Sandbox/Map_Sandbox
 end
 
-local assetCache = {}
-local function findAsset(path)
+local assetCache, assetFailAt = {}, {}
+-- noLoad = true: only objects the game already has in memory. Loading meshes from disk at runtime
+-- through UE4SS crashed the game in testing (twice, right after "Asset loaded"); sounds and effect
+-- classes have always loaded fine. A failed load is retried at most every 5 s, never every frame.
+local function findAsset(path, noLoad)
     local o = assetCache[path]
     if valid(o) then return o end
     o = StaticFindObject(path)
-    -- load from disk at most once per path: retrying a failing load every frame stalled and
-    -- then crashed the game in testing
-    if not valid(o) and o ~= false and assetCache[path] ~= false then
+    local now = os.clock()
+    if not valid(o) and not noLoad and (assetFailAt[path] == nil or now - assetFailAt[path] > 5) then
         pcall(LoadAsset, path:match("^(.-)%.") or path)
         o = StaticFindObject(path)
+        if not valid(o) then assetFailAt[path] = now end
     end
-    if valid(o) then assetCache[path] = o return o end
-    assetCache[path] = false
+    if valid(o) then assetCache[path] = o assetFailAt[path] = nil return o end
     return nil
 end
 
@@ -1147,8 +1149,11 @@ local function destroyHeld()
 end
 
 local function meshPartActor(part)
-    local asset = findAsset(part.path)
+    local asset = findAsset(part.path, true)       -- meshes: never load from disk (see findAsset)
     if not asset then return nil end
+    local want = part.kind == "K" and "/Script/Engine.SkeletalMesh" or "/Script/Engine.StaticMesh"
+    local okT, isRight = pcall(function() return asset:IsA(StaticFindObject(want)) end)
+    if not okT or not isRight then return nil end
     local a
     if part.kind == "K" then
         a = spawnActor("/Script/Engine.SkeletalMeshActor")
@@ -1174,7 +1179,7 @@ local function updateHeldItem(side, on, x, y, z, qx, qy, qz, qw)
         return
     end
     if not h then
-        if want.failedVer == want.ver then return end   -- nothing of this item could be shown; don't retry every frame
+        if want.failedVer == want.ver and os.clock() - (want.failedAt or 0) < 5 then return end   -- nothing of this item could be shown; don't retry every frame
         h ={ ver = want.ver, actors = {}, parts = {} }
         local names = {}
         for i = 1, want.n do
@@ -1190,7 +1195,7 @@ local function updateHeldItem(side, on, x, y, z, qx, qy, qz, qw)
                 log("held item mesh not found: " .. part.path)
             end
         end
-        if #h.actors == 0 then want.failedVer = want.ver return end
+        if #h.actors == 0 then want.failedVer, want.failedAt = want.ver, os.clock() return end
         heldShown[side] = h
         log("other player holds in " .. side .. " hand: " .. table.concat(names, ", "))
     end
@@ -1396,9 +1401,9 @@ local function updatePuppet(v)
                 local g = heldShown.R.actors[1]:K2_GetActorLocation()
                 log(string.format("held item R: %.0f cm from the right hand bone, visible %s", math.sqrt(dist2(g.X, g.Y, g.Z, rh[1], rh[2], rh[3])), tostring(not heldShown.R.hidden)))
             end
-            log(string.format("body check: head bone Z %.0f vs headset %.0f | left hand %.0f cm from controller, right hand %.0f cm | body yaw %.0f head yaw %.0f | speed %.0f",
+            log(string.format("body check: head bone Z %.0f vs headset %.0f | left hand %.0f cm from controller, right hand %.0f cm | body yaw %.0f head yaw %.0f | speed %.0f | me at (%.0f, %.0f, %.0f) yaw %.0f",
                 hb[3], v[3], math.sqrt(dist2(lh[1], lh[2], lh[3], v[8], v[9], v[10])), math.sqrt(dist2(rh[1], rh[2], rh[3], v[15], v[16], v[17])),
-                P.bodyYaw, headYaw, speed))
+                P.bodyYaw, headYaw, speed, localHead[1], localHead[2], localHead[3], select(2, quatToRot(headQuat[1], headQuat[2], headQuat[3], headQuat[4]))))
         end)
     end
     return true

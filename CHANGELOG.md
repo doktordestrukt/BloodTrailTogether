@@ -4,6 +4,13 @@ Versioning: [Semantic Versioning](https://semver.org). The version lives in `CMa
 `release.json` and `Scripts/main.lua` (the release script refuses to build if they differ).
 The network protocol version (`kProtocolVersion`) changes only when old and new clients can no longer talk.
 
+## [0.5.1] - 2026-11-21
+### Fixed
+- Untracked hands hang at the sides (IK to a relaxed target) instead of the NPC's clasped pose.
+- Held-item meshes are never loaded from disk at runtime (UE4SS LoadAsset of meshes crashed the game); asset type checked before use; failed loads retried every 5 s, not every frame.
+- Sound sharing forced on at start; window label "IN A GAME" for clients.
+- SimPeer: --at X Y, --yaw, --no-hands; static meshes sent as S.
+
 ## [0.5.0] - 2026-11-21
 ### Added
 - Finger poses on the other player's hands: wrapped round held items (index on the trigger), fist while gripping, relaxed otherwise. Grip-button state travels in pose flags 16/32.

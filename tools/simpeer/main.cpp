@@ -30,13 +30,17 @@ static BOOL WINAPI on_ctrl(DWORD) {
   return TRUE;
 }
 
+// --at X Y / --yaw DEG place the bot; --no-hands reports both controllers as untracked
+static float g_at_x = 0, g_at_y = 0, g_yaw = 90;
+static bool g_no_hands = false;
+
 static PoseFrame scripted_pose(const std::string& pattern, double t) {
   PoseFrame f{};
-  f.flags = 3;
+  f.flags = g_no_hands ? 0 : 3;
   float ang = pattern == "orbit" ? (float)(t * 0.5) : 0.0f;
   float r = pattern == "orbit" ? 150.0f : 0.0f;
-  Vec3 head = {std::cos(ang) * r, std::sin(ang) * r, 165.0f + 3.0f * (float)std::sin(t * 1.3)};
-  float face = ang + 1.5708f;
+  Vec3 head = {g_at_x + std::cos(ang) * r, g_at_y + std::sin(ang) * r, 165.0f + 3.0f * (float)std::sin(t * 1.3)};
+  float face = pattern == "orbit" ? ang + 1.5708f : g_yaw * 3.14159265f / 180.0f;
   Quat q = {0, 0, std::sin(face / 2), std::cos(face / 2)};
   f.head = {head, q};
   float wave = pattern == "idle" ? 0.0f : 25.0f * (float)std::sin(t * 4.0);
@@ -89,6 +93,9 @@ int main(int argc, char** argv) {
     else if (a == "--game") game_line = next();
     else if (a == "--fake-npc") fake_npc = true;
     else if (a == "--hold") hold_mesh = next();
+    else if (a == "--at") { g_at_x = (float)atof(next().c_str()); g_at_y = (float)atof(next().c_str()); }
+    else if (a == "--yaw") g_yaw = (float)atof(next().c_str());
+    else if (a == "--no-hands") g_no_hands = true;
     else if (arg1.empty()) arg1 = a;
     else arg2 = a;
   }
@@ -152,7 +159,7 @@ int main(int argc, char** argv) {
           e.type = EventType::Game;
           e.s1 = "held R 1 1.000";
           ses.send_event(e);
-          e.s1 = "heldpart R 1 " + hold_mesh + " K 0 0 0 0 0 0 1 1.000";
+          e.s1 = "heldpart R 1 " + hold_mesh + (hold_mesh.find("/SM_") != std::string::npos ? " S" : " K") + " 0 0 0 0 0 0 1 1.000";
           ses.send_event(e);
           hold_sent = true;
         }
