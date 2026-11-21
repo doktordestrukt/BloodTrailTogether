@@ -16,8 +16,7 @@ types it in. No VPN, no Hamachi/Radmin, no port forwarding, no changes to the ga
 
 1. Download **`BloodTrailTogether-Setup-vX.Y.Z.exe`** from [Releases](../../releases).
 2. Run it. It finds BloodTrail in your Steam libraries (or click **Browse…**).
-3. Click **Install**. You need [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) already installed in BloodTrail
-   (v0.1.0 does not bundle it yet; the installer tells you if it is missing).
+3. Click **Install**. If you do not have [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) yet, the installer adds it.
 4. Start BloodTrail through Steam as usual.
 5. Press **F9** in game for the multiplayer window → **Create Session** (host) or type the code → **Join Session**.
 

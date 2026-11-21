@@ -102,7 +102,14 @@ def main():
                 name = info.filename
                 if name.lower().endswith(".exe"):
                     continue  # never ship executables into the game folder
-                entries.append((2, name, z.read(info)))
+                data = z.read(info)
+                if name == "ue4ss/UE4SS-settings.ini":
+                    # BloodTrail is UE 4.27.2; pin it like the known-good install instead of auto-detecting.
+                    text = data.decode("utf-8")
+                    text = re.sub(r"(?m)^MajorVersion =\s*$", "MajorVersion = 4", text)
+                    text = re.sub(r"(?m)^MinorVersion =\s*$", "MinorVersion = 27", text)
+                    data = text.encode("utf-8")
+                entries.append((2, name, data))
         print(f"UE4SS bundled: {ue.get('name')} ({len([e for e in entries if e[0] == 2])} files)")
     elif "--allow-missing-ue4ss" not in args:
         sys.exit(f"UE4SS zip not found at {ue_zip}. Download it (see release.json ue4ss.url) or pass --allow-missing-ue4ss")
