@@ -49,6 +49,7 @@ std::string lua_handle_request(const std::string& req) {
   out.reserve(512);
   if (!eng) return "ST Starting - 0 0 0 0 - -\nRP -\n";
 
+  a.stat_frames++;
   std::istringstream lines(req);
   std::string line;
   while (std::getline(lines, line)) {
@@ -79,6 +80,8 @@ std::string lua_handle_request(const std::string& req) {
         }
         f.flags = (uint8_t)flags;
         eng->set_local_pose(f);
+        a.stat_poses++;
+        if (flags & 3) a.stat_hands++;
         break;
       }
       case 'M':
@@ -87,7 +90,10 @@ std::string lua_handle_request(const std::string& req) {
       case 'S': {
         std::string path;
         float v[5];
-        if (in >> path && parse_floats(in, v, 5)) eng->report_sound(path, {v[0], v[1], v[2]}, v[3], v[4]);
+        if (in >> path && parse_floats(in, v, 5)) {
+          a.stat_sounds_out++;
+          eng->report_sound(path, {v[0], v[1], v[2]}, v[3], v[4]);
+        }
         break;
       }
       case 'K':
@@ -120,6 +126,7 @@ std::string lua_handle_request(const std::string& req) {
 
   PoseFrame rp;
   if (eng->remote_pose(rp)) {
+    a.stat_remote++;
     out += "RP";
     put_xform(out, rp.head);
     put_xform(out, rp.left);
@@ -135,9 +142,11 @@ std::string lua_handle_request(const std::string& req) {
     char b[1400];
     switch (c.kind) {
       case GameCommand::Travel:
+        a.stat_travel++;
         out += "TR " + c.a + "\n";
         break;
       case GameCommand::Sound:
+        a.stat_sounds_in++;
         snprintf(b, sizeof(b), "SN %s %.1f %.1f %.1f %.3f %.3f\n", token_safe(c.a).c_str(), c.v.x, c.v.y, c.v.z, c.f0, c.f1);
         out += b;
         break;

@@ -44,6 +44,35 @@ static DWORD WINAPI init_thread(LPVOID) {
   pipe_server_start();
   control_window_start();
 
+  if (a.settings.dev_mode) {
+    // Developer automation for unattended tests: Dev.AutoStart = sim_mirror | sim_orbit | udp_host | udp_join
+    std::string auto_start = a.config.get("Dev.AutoStart");
+    std::thread([auto_start] {
+      App& a = app();
+      if (!auto_start.empty()) {
+        while (!a.lua_connected) Sleep(200);  // wait until the game-side script is alive
+        Sleep(2000);
+        BTT_INFO("dev: auto-start %s", auto_start.c_str());
+        if (auto_start == "sim_mirror") a.engine->start_simulated_peer(SimMode::Mirror);
+        else if (auto_start == "sim_orbit") a.engine->start_simulated_peer(SimMode::Orbit);
+        else if (auto_start == "udp_host") a.engine->host_dev_udp(27777);
+        else if (auto_start == "udp_join") a.engine->join_dev_udp("127.0.0.1", 27777);
+      }
+      // Periodic diagnostics so a session can be judged from the log alone.
+      for (;;) {
+        Sleep(5000);
+        EngineSnapshot s = a.engine->snapshot();
+        BTT_INFO("dev stats: state=%s peer=%s rtt=%.0fms loss=%.1f%% map=%s remote_map=%s | lua frames=%llu poses=%llu "
+                 "hands=%llu remote_served=%llu sounds_out=%llu sounds_in=%llu travel=%llu",
+                 s.state.c_str(), s.peer_name.c_str(), s.rtt_ms, s.loss_pct, s.local_map.c_str(), s.remote_map.c_str(),
+                 (unsigned long long)a.stat_frames.load(), (unsigned long long)a.stat_poses.load(),
+                 (unsigned long long)a.stat_hands.load(), (unsigned long long)a.stat_remote.load(),
+                 (unsigned long long)a.stat_sounds_out.load(), (unsigned long long)a.stat_sounds_in.load(),
+                 (unsigned long long)a.stat_travel.load());
+      }
+    }).detach();
+  }
+
   if (a.settings.update_check && !a.settings.update_repo.empty()) {
     std::thread([] {
       Sleep(5000);  // don't compete with game start-up

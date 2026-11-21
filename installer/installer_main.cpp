@@ -75,8 +75,7 @@ int run_cli(int argc, wchar_t** argv) {
     }
   }
   auto prog = [](int pct, const std::string& line) {
-    say("[%3d%%] %s\n", pct, line.c_str());
-    logline(line);
+    say("[%3d%%] %s\n", pct, line.c_str());  // say() also writes the log
   };
   if (cmd == L"--info") {
     say("payload: %s\n", g_payload_err.empty() ? "ok" : g_payload_err.c_str());

@@ -59,6 +59,9 @@ int main(int argc, char** argv) {
   }
   std::string mode = argv[1], arg1, arg2;
   std::string name = "SimPeer", cfg_path, pattern = "orbit", log_path;
+  std::string start_map = "/Game/Maps/Beta/Map_Beta_Basement";  // as host, the map the game should follow to
+  std::string sound_path;  // if set, emit this sound asset from the bot's head every 5 s
+  double last_sound = 0;
   ImpairmentParams imp;
   double seconds = 0;
   for (int i = 2; i < argc; ++i) {
@@ -72,6 +75,8 @@ int main(int argc, char** argv) {
     else if (a == "--pattern") pattern = next();
     else if (a == "--seconds") seconds = atof(next().c_str());
     else if (a == "--log") log_path = next();
+    else if (a == "--map") start_map = next();
+    else if (a == "--sound") sound_path = next();
     else if (arg1.empty()) arg1 = a;
     else arg2 = a;
   }
@@ -102,7 +107,7 @@ int main(int argc, char** argv) {
   ses.set_pose_rate(s.pose_send_hz);
 
   double start = now_sec(), last_print = 0;
-  std::string printed_code, my_map = "/Game/Maps/Beta/Map_Beta_Basement";
+  std::string printed_code, my_map = start_map;
   int sounds_echoed = 0;
   while (g_run) {
     double now = now_sec();
@@ -112,6 +117,17 @@ int main(int argc, char** argv) {
       printf("\n  JOIN CODE: %s\n\n", printed_code.c_str());
     }
     ses.set_local_pose(scripted_pose(pattern, now - start));
+    if (!sound_path.empty() && ses.state() == SessionState::Connected && now - last_sound > 5.0) {
+      last_sound = now;
+      NetEvent e;
+      e.type = EventType::Sound;
+      e.s1 = sound_path;
+      e.v = scripted_pose(pattern, now - start).head.p;
+      e.f0 = 1.0f;
+      e.f1 = 1.0f;
+      ses.send_event(e);
+      BTT_INFO("sent sound %s", sound_path.c_str());
+    }
     std::vector<NetEvent> evs;
     ses.pop_events(evs);
     for (auto& e : evs) {

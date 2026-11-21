@@ -380,9 +380,13 @@ local function nearLocalPlayer(x, y, z)
         or dist2(x, y, z, localRight[1], localRight[2], localRight[3]) < shareRadius2
 end
 
+local hookCalls, soundsCaptured, soundsPlayed, soundsMissing = 0, 0, 0, 0
+
 local function captureSound(sound, x, y, z, vol, pitch)
+    hookCalls = hookCalls + 1
     if playingRemote or #pendingSounds > 16 then return end
     if not valid(sound) or not nearLocalPlayer(x, y, z) then return end
+    soundsCaptured = soundsCaptured + 1
     pendingSounds[#pendingSounds + 1] = string.format("S %s %.1f %.1f %.1f %.3f %.3f", objPath(sound), x, y, z, vol or 1, pitch or 1)
 end
 
@@ -418,14 +422,24 @@ end
 
 local function playRemoteSound(path, x, y, z, vol, pitch)
     local snd = findAsset(path)
-    if not snd then return end
+    if not snd then
+        soundsMissing = soundsMissing + 1
+        if soundsMissing <= 5 then log("remote sound asset not found: " .. path) end
+        return
+    end
     local world = UEHelpers.GetWorld()
     local gs = UEHelpers.GetGameplayStatics()
     playingRemote = true
-    pcall(function()
+    local ok, err = pcall(function()
         gs:PlaySoundAtLocation(world, snd, { X = x, Y = y, Z = z }, { Pitch = 0, Yaw = 0, Roll = 0 }, vol, pitch, 0, nil, nil, nil)
     end)
     playingRemote = false
+    if ok then
+        soundsPlayed = soundsPlayed + 1
+        if soundsPlayed <= 3 then log(string.format("played remote sound %s at (%.0f, %.0f, %.0f)", path, x, y, z)) end
+    else
+        log("playing remote sound failed: " .. tostring(err))
+    end
 end
 
 ------------------------------------------------------------------------------- map following
@@ -517,6 +531,10 @@ local function frame()
         end
         if currentMap then req[#req + 1] = "M " .. currentMap end
     end
+    if frameNo % 900 == 0 then
+        req[#req + 1] = string.format("D sound hooks fired=%d captured=%d played=%d missing=%d avatar=%s",
+            hookCalls, soundsCaptured, soundsPlayed, soundsMissing, tostring(avatar ~= nil and not avatarDisabled))
+    end
     for i = 1, #pendingSounds do req[#req + 1] = pendingSounds[i] end
     pendingSounds = {}
 
@@ -535,15 +553,29 @@ RegisterKeyBind(KEY_TOGGLE_WINDOW, function()
     if pipeUp then exchange("K toggle_window\n") end
 end)
 
-LoopAsync(FRAME_MS, function()
-    if not framePending then
-        framePending = true
-        ExecuteInGameThread(function()
-            local ok, err = pcall(frame)
-            if not ok then log("frame error: " .. tostring(err)) end
-        end)
-    end
-    return false  -- keep looping
-end)
+local function safeFrame()
+    local ok, err = pcall(frame)
+    if not ok then log("frame error: " .. tostring(err)) end
+end
+
+if type(LoopInGameThreadAfterFrames) == "function" then
+    -- One persistent callback, run by UE4SS on the game thread every frame. (Creating a new
+    -- ExecuteInGameThread closure ~90 times a second from LoopAsync crashed UE4SS in testing:
+    -- "Ref was not function" followed by an access violation.)
+    LoopInGameThreadAfterFrames(1, function()
+        safeFrame()
+        return false
+    end)
+    log("frame loop: LoopInGameThreadAfterFrames")
+else
+    LoopAsync(FRAME_MS, function()
+        if not framePending then
+            framePending = true
+            ExecuteInGameThread(safeFrame)
+        end
+        return false  -- keep looping
+    end)
+    log("frame loop: LoopAsync + ExecuteInGameThread (older UE4SS)")
+end
 
 log("BloodTrail Together " .. VERSION .. " Lua side started (F9 toggles the multiplayer window)")

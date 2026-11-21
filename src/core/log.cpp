@@ -3,6 +3,8 @@
 #include <windows.h>
 
 #include <chrono>
+#include <share.h>
+
 #include <cstdio>
 #include <mutex>
 
@@ -20,7 +22,8 @@ void log_init(const std::wstring& path, bool console, LogLevel min_level) {
   std::lock_guard<std::mutex> lk(g_mu);
   if (g_file) fclose(g_file);
   g_file = nullptr;
-  if (!path.empty()) _wfopen_s(&g_file, path.c_str(), L"w");
+  // Shared read access so the log can be viewed (or copied for a bug report) while the game runs.
+  if (!path.empty()) g_file = _wfsopen(path.c_str(), L"w", _SH_DENYWR);
   g_console = console;
   g_min = min_level;
 }

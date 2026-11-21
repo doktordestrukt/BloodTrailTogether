@@ -38,7 +38,8 @@ static SOCKET make_socket(uint16_t bind_port, std::string& err) {
   sockaddr_in a{};
   a.sin_family = AF_INET;
   a.sin_port = htons(bind_port);
-  a.sin_addr.s_addr = htonl(bind_port ? INADDR_ANY : INADDR_ANY);
+  // Developer transport is localhost-only: binding to loopback also avoids Windows Firewall prompts.
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   if (bind(s, (sockaddr*)&a, sizeof(a)) != 0) {
     err = "bind() failed on port " + std::to_string(bind_port);
     closesocket(s);

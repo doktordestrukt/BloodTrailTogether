@@ -5,9 +5,10 @@ normal Steam installs meet in the same map, see each other's head and hands, and
 gunfire and hand sounds. One player creates a session and reads out a short **join code**; the other
 types it in. No VPN, no Hamachi/Radmin, no port forwarding, no changes to the game executable.
 
-> **Status: v0.1.0 — early alpha, not yet verified in-game.** The networking, Unity Relay client,
-> installer and the game-side bridge are built and covered by automated tests (see below). The parts
-> that run inside the game (`Scripts/main.lua`) have not yet been tested in a headset. Expect bugs.
+> **Status: v0.1.0 — early alpha.** Tested inside the real game in desktop mode (no headset): the
+> remote avatar appears, the joining player follows the host into Sandbox and Raid maps, and shared
+> sounds play at the right position. Not yet tested: headset/controller tracking in VR, and online play
+> through Unity Relay. Expect bugs.
 
 ![Installer](docs/screenshots/installer.png) ![Multiplayer window](docs/screenshots/multiplayer-window.png)
 
@@ -26,9 +27,9 @@ Details: [INSTALLATION.md](INSTALLATION.md) · Problems: [TROUBLESHOOTING.md](TR
 | Feature | State |
 |---|---|
 | Unity Relay sessions with join codes (no port forwarding / VPN) | implemented; protocol checked against Unity's reference client; tested against a local mock relay. Live Unity test pending the project id |
-| Remote avatar: head + both controllers, interpolated, name tag with ping | implemented; in-game test pending |
-| Both game modes (Sandbox and Arcade: Raid / Arenas) | client follows the host's map (both modes load maps the same way); in-game test pending |
-| Shared positional audio (gunshots, hand sounds near a player) | implemented via UE4SS hooks; in-game test pending |
+| Remote avatar: head + both controllers, interpolated, name tag with ping | works in game (desktop test); VR controller tracking untested |
+| Both game modes (Sandbox and Arcade: Raid / Arenas) | client follows the host's map: verified in game for Sandbox and Raid level 1 |
+| Shared positional audio (gunshots, hand sounds near a player) | playback verified in game; capturing your own gunshots needs a VR test |
 | Disconnect / interruption detection, rejoin with the same code | implemented and tested |
 | Test without a second person (simulated player) | implemented and tested |
 | Shared NPCs / doors / raid state | **not yet** — see roadmap |

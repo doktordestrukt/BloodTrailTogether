@@ -1,4 +1,6 @@
 #pragma once
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -23,6 +25,10 @@ struct App {
   std::string lua_version;
   bool lua_connected = false;
   int pipe_index = 0;
+
+  // Bridge counters (diagnostics)
+  std::atomic<uint64_t> stat_frames{0}, stat_poses{0}, stat_hands{0}, stat_remote{0}, stat_sounds_out{0},
+      stat_sounds_in{0}, stat_travel{0};
 
   void save_name(const std::string& name);
 };

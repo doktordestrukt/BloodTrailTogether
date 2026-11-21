@@ -52,3 +52,37 @@ Docs page (relay-message-protocol) vs Unity Transport source (`needle-mirror/com
 - Anything inside the running game (main.lua): pose capture, avatar spawning, sound hooks, OpenLevel follow.
 - Live Unity Relay (no project id yet).
 - Installing UE4SS from the pinned zip (zip not downloaded yet; extraction logic tested with a fake UE4SS).
+
+## 2026-11-21 — First in-game tests (real BloodTrail install, no headset, `-nohmd` desktop mode)
+Installed with the real installer (`--install`), UE4SS kept. Verified afterwards that all 955 pre-existing
+files in `BTVR\Binaries\Win64` were byte-identical (only ReShade later rewrote its own log).
+
+### Crash found and fixed
+- First run: game crashed ~1.3 s after the avatar spawned. UE4SS logged `Ref was not function`, crash
+  report: EXCEPTION_ACCESS_VIOLATION inside UE4SS. Cause: the frame loop created a new
+  `ExecuteInGameThread` closure from `LoopAsync` ~90x/s. Fix: one persistent
+  `LoopInGameThreadAfterFrames(1, ...)` callback (available in this UE4SS build; old path kept as fallback).
+  After the fix: several runs of 2-5 minutes without problems.
+
+### Verified in the running game
+- Lua loads `btt_core.dll` via `package.loadlib`, all three sound hooks register, bridge connects.
+- Simulated player (mirror) joins; remote avatar (head sphere, visor, hand cubes, "SimBot 3ms" tag)
+  visible in the hub (`Map_Beta_Basement`) - screenshot taken.
+- Multiplayer window works inside the game process (status, ping, same-map indicator).
+- **Map following, both modes**: SimPeer hosting on `Map_Sandbox` (Sandbox) and on `Map_Raid_lvl1`
+  (Arcade/Raid) -> the game (client) loaded the host's map by itself within ~2 s, avatar re-created on the new map.
+- Bridge at ~130 frames/s (desktop frame rate), remote pose available every frame, 6-12 ms RTT, 0 % loss
+  over localhost UDP for 80+ s.
+- **Shared audio playback**: 19/19 remote sound events (`Cue_ZombieMoan`) loaded and played at the
+  sender's position. The native GameplayStatics hooks fire, and our own playback is not echoed back.
+
+### Still unverified (needs the headset and/or a Unity project)
+- Motion controller tracking (`hands=0` without a headset), avatar orientation/scale in VR.
+- Capturing the local player's own gunshots (needs VR input).
+- Unity Relay against the live service.
+
+### Other fixes
+- Log file is now opened with shared read access (could not be read while the game ran).
+- Dev UDP transport binds to 127.0.0.1 (no Windows Firewall prompt).
+- `dev.ini` `AutoStart=` (sim_mirror | sim_orbit | udp_host | udp_join) + 5-second diagnostic stats lines.
+- SimPeer `--map` and `--sound` options; installer no longer logs each line twice.
