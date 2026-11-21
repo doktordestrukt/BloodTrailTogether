@@ -9,6 +9,7 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -343,14 +344,35 @@ void draw(HDC dc) {
   screen.DrawImage(&bmp, 0, 0);
 }
 
+std::atomic<bool> g_quick_join{false};
+double g_quick_join_since = 0;
+
+// Server-list upkeep; runs even while the window is hidden (hosting from the watch menu).
+void lobby_tick() {
+  if (!g_lobby) return;
+  App& a = app();
+  EngineSnapshot s = a.engine->snapshot();
+  bool open = s.role == "host" && s.state == "Waiting" && !s.join_code.empty() && s.transport.rfind("unity-relay", 0) == 0;
+  g_lobby->set_listing(open, current_name(), short_map(s.local_map), s.join_code);
+  if (g_quick_join && !g_lobby->refreshing() && g_lobby->last_refresh() > g_quick_join_since) {
+    g_quick_join = false;
+    for (auto& e : g_lobby->servers()) {
+      bool compatible = e.proto ? e.proto == (int)kProtocolVersion : e.version == BTT_VERSION;
+      if (compatible && e.players < e.max_players) {
+        a.engine->join_relay(e.join_code);
+        a.engine->notify_local("Joining " + e.host_name + "...");
+        return;
+      }
+    }
+    a.engine->notify_local(g_lobby->last_error().empty() ? "No open games found" : g_lobby->last_error());
+  }
+}
+
 void tick() {
   App& a = app();
   EngineSnapshot s = a.engine->snapshot();
   double now = now_sec();
-  // keep the public listing in step with the session
   if (g_lobby) {
-    bool open = s.role == "host" && s.state == "Waiting" && !s.join_code.empty() && s.transport.rfind("unity-relay", 0) == 0;
-    g_lobby->set_listing(open, current_name(), short_map(s.local_map), s.join_code);
     bool idle = s.state == "Idle" || s.state == "Disconnected";
     if (idle && a.window_visible && now - g_last_auto_refresh > 8.0) {
       g_last_auto_refresh = now;
@@ -444,7 +466,21 @@ LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
       SetBkColor((HDC)w, RGB(20, 14, 14));
       return (LRESULT)g_edit_bg;
     case WM_TIMER:
+      lobby_tick();
       if (app().window_visible) tick();
+      return 0;
+    case WM_APP + 2:  // watch menu: host
+      apply_name();
+      app().engine->host_relay();
+      app().engine->notify_local("Hosting - your game is in the server list");
+      return 0;
+    case WM_APP + 3:  // watch menu: quick join
+      if (!g_lobby) { app().engine->notify_local("Server list unavailable (no Unity project id)"); return 0; }
+      apply_name();
+      g_quick_join_since = now_sec();
+      g_quick_join = true;
+      g_lobby->request_refresh();
+      app().engine->notify_local("Looking for an open game...");
       return 0;
     case WM_MOUSEMOVE: {
       g_mouse_x = GET_X_LPARAM(l);
@@ -532,6 +568,14 @@ void control_window_start() {
 
 void control_window_toggle() {
   if (g_wnd) PostMessageW(g_wnd, WM_APP + 1, 0, 0);
+}
+
+void control_window_host() {
+  if (g_wnd) PostMessageW(g_wnd, WM_APP + 2, 0, 0);
+}
+
+void control_window_quick_join() {
+  if (g_wnd) PostMessageW(g_wnd, WM_APP + 3, 0, 0);
 }
 
 }  // namespace btt

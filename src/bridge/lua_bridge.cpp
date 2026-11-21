@@ -104,6 +104,10 @@ std::string lua_handle_request(const std::string& req) {
         if (rest == "toggle_window") control_window_toggle();
         else if (rest == "sim") eng->start_simulated_peer(SimMode::Mirror);
         else if (rest == "disconnect") eng->disconnect();
+        else if (rest == "host") control_window_host();
+        else if (rest == "quickjoin") control_window_quick_join();
+        else if (rest == "share_on") eng->set_share_sounds(true);
+        else if (rest == "share_off") eng->set_share_sounds(false);
         break;
       case 'W': {
         std::string key, value;

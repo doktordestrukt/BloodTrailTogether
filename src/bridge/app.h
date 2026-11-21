@@ -41,5 +41,7 @@ std::string lua_handle_request(const std::string& req);
 void pipe_server_start();
 void control_window_start();
 void control_window_toggle();
+void control_window_host();        // watch menu: host a listed game
+void control_window_quick_join();  // watch menu: join the first compatible listed game
 
 }  // namespace btt

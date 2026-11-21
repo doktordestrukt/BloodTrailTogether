@@ -4,6 +4,13 @@ Versioning: [Semantic Versioning](https://semver.org). The version lives in `CMa
 `release.json` and `Scripts/main.lua` (the release script refuses to build if they differ).
 The network protocol version (`kProtocolVersion`) changes only when old and new clients can no longer talk.
 
+## [0.5.0] - 2026-11-21
+### Added
+- Finger poses on the other player's hands: wrapped round held items (index on the trigger), fist while gripping, relaxed otherwise. Grip-button state travels in pose flags 16/32.
+- Muzzle flashes (game's BP_MuzzleFlash_Generic / _12ga) for every shared gunshot, including NPC shots aimed at you.
+- Bullet impacts: the shooter's own bullets report SpawnHitEffect point/normal/surface; the other game spawns the matching BP_BHole_* effect.
+- Watch hologram menu: tap your left wrist with your right hand; host, quick join, leave, name tags, health bars, bullet FX, share sounds. Settings saved in watch_settings.txt.
+
 ## [0.4.0] - 2026-11-21
 ### Added
 - Server list (Unity Lobby): hosting lists your game publicly; others join with a click. Listings carry the Relay join code, map, mod version and protocol; heartbeat every 10 s, removed on join/close.

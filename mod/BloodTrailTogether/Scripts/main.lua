@@ -7,7 +7,7 @@
 -- Everything that touches the game is wrapped in pcall: a failure disables that feature and is
 -- logged to UE4SS.log / BloodTrailTogether.log instead of crashing the game.
 
-local VERSION = "0.4.0"
+local VERSION = "0.5.0"
 local TAG = "[BloodTrailTogether] "
 local UEHelpers = require("UEHelpers")
 
@@ -423,6 +423,15 @@ local function readLocalPose()
     end
     localLeft[1], localLeft[2], localLeft[3] = L[1], L[2], L[3]
     localRight[1], localRight[2], localRight[3] = R[1], R[2], R[3]
+    EX.leftQ, EX.rightQ = { L[4], L[5], L[6], L[7] }, { R[4], R[5], R[6], R[7] }
+    -- grip buttons held (fist on the other player's body): flags 16 = left, 32 = right
+    pcall(function()
+        local pw = getPawn()
+        if pw then
+            if pw.GripHeld_L then flags = flags | 16 end
+            if pw.GripHeld_R then flags = flags | 32 end
+        end
+    end)
     -- Body: floor point under the head. VRExpansion pawns have their actor ON the floor
     -- (measured: actor Z 0.6, floor 0); other pawns at the capsule centre.
     local floorZ = hz - 165
@@ -570,6 +579,16 @@ local function updateAvatar(v, peerName, quality, rtt, shapes)
         end
         avatar.hidden = false
         avatar.shapes = shapes
+        avatar.setVer = nil
+    end
+    -- watch settings: name tag / health bar on or off
+    if avatar.setVer ~= EX.settingsVer then
+        avatar.setVer = EX.settingsVer
+        pcall(function() avatar.tag:SetActorHiddenInGame(not EX.settings.tags) end)
+        pcall(function()
+            avatar.hpBg:SetActorHiddenInGame(not EX.settings.bars)
+            avatar.hpFg:SetActorHiddenInGame(not EX.settings.bars)
+        end)
     end
     if shapes then
         place(avatar.head, v[1], v[2], v[3], v[4], v[5], v[6], v[7])
@@ -720,6 +739,9 @@ local function playRemoteSound(path, x, y, z, vol, pitch)
         gs:PlaySoundAtLocation(world, snd, { X = x, Y = y, Z = z }, { Pitch = 0, Yaw = 0, Roll = 0 }, vol, pitch, 0, att, nil, nil)
     end)
     playingRemote = false
+    if ok and path:lower():find("fire", 1, true) and not path:lower():find("dryfire", 1, true) and EX.muzzleFlash then
+        pcall(EX.muzzleFlash, path, x, y, z)       -- a gunshot from the other player (or an NPC at me)
+    end
     if ok then
         soundsPlayed = soundsPlayed + 1
         if soundsPlayed <= 5 then log(string.format("played remote sound %s at (%.0f, %.0f, %.0f), 3D: %s", path, x, y, z, valid(att) and objPath(att) or "its own")) end
@@ -1072,6 +1094,46 @@ local function solveHead(P, hq, actorYaw)
     setBoneRot(pose, "Head", hp, target)
 end
 
+-- Finger poses: curl the fingers of hand `side` ("l"/"r") by `amount` (0 open .. 1 fist); the index
+-- finger uses `trigger` instead (a gun grip keeps it straighter, on the trigger). The bend axis is
+-- worked out from the hand's own bones (wrist->middle knuckle, pinky->index), so it is right for
+-- either hand whatever the skeleton's bone axes are.
+local FINGERS = { "index", "middle", "ring", "pinky" }
+local FINGER_DEG = { 48, 62, 42 }
+function EX.curlHand(P, side, amount, trigger)
+    if amount < 0.02 then return end
+    local pose = P.pose
+    local hp = boneT(pose, "hand_" .. side)
+    local mid = boneT(pose, "middle_01_" .. side)
+    local ind = boneT(pose, "index_01_" .. side)
+    local pin = boneT(pose, "pinky_01_" .. side)
+    local ax, ay, az = mid[1] - hp[1], mid[2] - hp[2], mid[3] - hp[3]
+    local cx, cy, cz = ind[1] - pin[1], ind[2] - pin[2], ind[3] - pin[3]
+    local nx, ny, nz = ay * cz - az * cy, az * cx - ax * cz, ax * cy - ay * cx   -- palm normal (right hand)
+    if side == "l" then nx, ny, nz = -nx, -ny, -nz end                           -- mirrored for the left hand
+    local kx, ky, kz = ay * nz - az * ny, az * nx - ax * nz, ax * ny - ay * nx   -- along x palm: bends towards the palm
+    local kl = math.sqrt(kx * kx + ky * ky + kz * kz)
+    if kl < 1e-6 then return end
+    kx, ky, kz = kx / kl, ky / kl, kz / kl
+    for _, f in ipairs(FINGERS) do
+        local a = (f == "index") and trigger or amount
+        for seg = 1, 3 do
+            local name = f .. "_0" .. seg .. "_" .. side
+            local ang = FINGER_DEG[seg] * DEG * a
+            local s = math.sin(ang / 2)
+            local p, q = boneT(pose, name)
+            setBoneRot(pose, name, p, qnorm(qmul({ kx * s, ky * s, kz * s, math.cos(ang / 2) }, q)))
+        end
+    end
+    for seg = 2, 3 do                                    -- thumb wraps in a little
+        local name = "thumb_0" .. seg .. "_" .. side
+        local ang = 22 * DEG * amount
+        local s = math.sin(ang / 2)
+        local p, q = boneT(pose, name)
+        setBoneRot(pose, name, p, qnorm(qmul({ kx * s, ky * s, kz * s, math.cos(ang / 2) }, q)))
+    end
+end
+
 -- Things the other player holds (gun, magazine, knife...), drawn at the exact streamed transform.
 -- remoteHeld[side] = { ver, n, ms, parts = { [i] = { path, kind, rel pos/rot, scale } } }
 local remoteHeld = { L = { ver = 0, n = 0, parts = {} }, R = { ver = 0, n = 0, parts = {} } }
@@ -1272,6 +1334,14 @@ local function updatePuppet(v)
             solveHead(P, { v[4], v[5], v[6], v[7] }, P.bodyYaw)
             if (flags & 1) ~= 0 then solveArm(P, "l", v[8], v[9], v[10], { v[11], v[12], v[13], v[14] }, P.bodyYaw) end
             if (flags & 2) ~= 0 then solveArm(P, "r", v[15], v[16], v[17], { v[18], v[19], v[20], v[21] }, P.bodyYaw) end
+            -- fingers: wrapped round a held item (index on the trigger), a fist while gripping, else relaxed
+            for _, h in ipairs({ { "l", 4, 16 }, { "r", 8, 32 } }) do
+                local holding, gripping = (flags & h[2]) ~= 0, (flags & h[3]) ~= 0
+                local want = holding and 0.85 or gripping and 1.0 or 0.15
+                local key = "curl" .. h[1]
+                P[key] = (P[key] or 0.15) + (want - (P[key] or 0.15)) * 0.3
+                pcall(EX.curlHand, P, h[1], P[key], holding and P[key] * 0.45 or P[key])
+            end
         end)
         if not okI then
             P.ikErrors = (P.ikErrors or 0) + 1
@@ -1921,43 +1991,289 @@ function EX.onNpcFire(npc)
     sendGame(string.format("npcshot %d %s", id, bone))
 end
 
-------------------------------------------------------------------------------- in-headset status
--- Wrist panel: raise your left hand in front of your face and look at it - a small status panel
--- (session, player, ping, maps) pops up above the hand with a quick grow animation.
+------------------------------------------------------------------------------- muzzle flash + bullet impacts
+-- Shooter: the game's bullet (BP_BT_Projectile_Base) calls SpawnHitEffect(Hit, Velocity) where it
+-- lands; for my own bullets the impact point, normal and surface are sent. The other game spawns
+-- the game's own bullet-hole effect for that surface (decal, dust, sound). Muzzle flashes: every
+-- shared gunshot (theirs, and NPC shots aimed at you) spawns the game's muzzle flash where it fired.
+EX.cmds = {}   -- "K ..." commands for the DLL (watch menu)
+EX.settings = { tags = true, bars = true, fx = true, share = true }
+EX.settingsVer = 1
+local PROJECTILE_CLASS = "/Game/BloodTrailWeapons/Projectiles/BP_BT_Projectile_Base.BP_BT_Projectile_Base_C"
+local BHOLE = "/Game/WeaponMaster/Decals/BP_BHole_%s.BP_BHole_%s_C"
+local BHOLE_SURFACES = { "Wood", "Metal_Light", "Tile", "Plaster", "Brick", "Dirt", "Grass", "Cloth" }
+
+function EX.spawnAt(classPath, x, y, z, pitch, yaw, life)
+    local cls = findAsset(classPath)
+    local world = getWorld()
+    local gs = UEHelpers.GetGameplayStatics()
+    if not (valid(cls) and valid(world) and valid(gs)) then return nil end
+    local qx, qy, qz, qw = rotToQuat(pitch or 0, yaw or 0, 0)
+    local t = { Rotation = { X = qx, Y = qy, Z = qz, W = qw }, Translation = { X = x, Y = y, Z = z }, Scale3D = { X = 1, Y = 1, Z = 1 } }
+    local a = gs:BeginDeferredActorSpawnFromClass(world, cls, t, 1, nil)
+    if not valid(a) then return nil end
+    gs:FinishSpawningActor(a, t)
+    if valid(a) and life then pcall(function() a:SetLifeSpan(life) end) end
+    return a
+end
+
+function EX.fxTick()
+    if EX.impactHooked then return end
+    if not EX.projWatch then
+        EX.projWatch = true
+        pcall(NotifyOnNewObject, PROJECTILE_CLASS, function() EX.projSeen = true end)
+    end
+    if not EX.projSeen then return end
+    EX.impactHooked = true
+    local ok, err = pcall(RegisterHook, PROJECTILE_CLASS .. ":SpawnHitEffect", function(ctx, Hit)
+        pcall(EX.onMyImpact, ctx:get(), Hit)
+    end)
+    log((ok and "hooked " or "could not hook ") .. "bullet impacts" .. (ok and "" or (": " .. tostring(err))))
+end
+
+function EX.onMyImpact(proj, Hit)
+    if status.state ~= "Connected" or not valid(proj) then return end
+    local mine = false
+    pcall(function() mine = proj.bIsMyProjectile == true end)
+    if not mine then return end
+    local hr = Hit:get()
+    local surf = "-"
+    pcall(function() surf = hr.PhysMaterial:Get():GetFName():ToString() end)
+    local ls = surf:lower()
+    if ls:find("flesh") or ls:find("skin") or ls:find("body") or ls:find("blood") or ls:find("meat") then return end  -- body hits are synced as gore
+    local p, n = hr.ImpactPoint, hr.ImpactNormal
+    sendGame(string.format("impact %.1f %.1f %.1f %.3f %.3f %.3f %s", p.X, p.Y, p.Z, n.X, n.Y, n.Z, surf))
+end
+
+function EX.onImpact(x, y, z, nx, ny, nz, surf)
+    if not EX.settings.fx then return end
+    local kind = "Concrete"
+    local ls = (surf or ""):lower()
+    for _, s in ipairs(BHOLE_SURFACES) do
+        if ls:find(s:lower():match("^[a-z]+"), 1, true) then kind = s break end
+    end
+    local pitch = math.asin(math.max(-1, math.min(1, nz))) * RAD
+    local yaw = math.atan(ny, nx) * RAD
+    local a = EX.spawnAt(string.format(BHOLE, kind, kind), x, y, z, pitch, yaw, 60)
+    if not a and not EX.bholeWarned then EX.bholeWarned = true log("bullet hole effect could not be spawned: " .. kind) end
+end
+
+function EX.muzzleFlash(path, x, y, z)
+    if not EX.settings.fx then return end
+    -- point it the way the gun the other player holds points (nearest held item)
+    local pitch, yaw = 0, 0
+    for _, h in pairs(heldShown) do
+        if h and h.actors and valid(h.actors[1]) then
+            local l = h.actors[1]:K2_GetActorLocation()
+            if dist2(l.X, l.Y, l.Z, x, y, z) < 80 * 80 then
+                local r = h.actors[1]:K2_GetActorRotation()
+                pitch, yaw = r.Pitch, r.Yaw
+            end
+        end
+    end
+    local lp = path:lower()
+    local cls = (lp:find("12ga") or lp:find("shotgun")) and "/Game/WeaponMaster/Blueprints/Effects/BP_MuzzleFlash_12ga.BP_MuzzleFlash_12ga_C"
+        or "/Game/WeaponMaster/Blueprints/Effects/BP_MuzzleFlash_Generic.BP_MuzzleFlash_Generic_C"
+    EX.spawnAt(cls, x, y, z, pitch, yaw, 2)
+end
+
+------------------------------------------------------------------------------- watch: status + hologram menu
+-- Look at your raised left hand: a status hologram (who, ping, health) appears above the watch.
+-- Tap the watch with your right hand: a holographic settings menu opens above it. Touch an entry
+-- with your right hand and hold it there for a moment to activate it. Settings are remembered.
+local SETTINGS_FILE = modDir .. "\\watch_settings.txt"
+function EX.loadSettings()
+    local f = io.open(SETTINGS_FILE, "r")
+    if not f then return end
+    for line in f:lines() do
+        local k, v = line:match("^(%w+)=(%d)")
+        if k and EX.settings[k] ~= nil then EX.settings[k] = v == "1" end
+    end
+    f:close()
+end
+function EX.saveSettings()
+    EX.settingsVer = EX.settingsVer + 1
+    pcall(function()
+        local f = io.open(SETTINGS_FILE, "w")
+        if not f then return end
+        for k, v in pairs(EX.settings) do f:write(k, "=", v and "1" or "0", "\n") end
+        f:close()
+    end)
+end
+pcall(EX.loadSettings)
+EX.shareApplied = false   -- tell the DLL the remembered "share my sounds" setting once
+
+EX.HOLO = { R = 70, G = 225, B = 255 }          -- hologram cyan
+EX.HOLO_HOT = { R = 255, G = 255, B = 255 }
+EX.HOLO_FIRE = { R = 255, G = 70, B = 70 }
+
+function EX.menuItems()
+    local function onOff(b) return b and "ON" or "OFF" end
+    local items = {}
+    local st = status.state
+    local inGame = st == "Connected" or st == "Waiting" or st == "Connecting" or st == "Interrupted" or st == "Preparing"
+    if inGame then
+        items[#items + 1] = { label = "LEAVE GAME", act = function() EX.cmds[#EX.cmds + 1] = "K disconnect" end }
+    else
+        items[#items + 1] = { label = "HOST GAME", act = function() EX.cmds[#EX.cmds + 1] = "K host" end }
+        items[#items + 1] = { label = "QUICK JOIN", act = function() EX.cmds[#EX.cmds + 1] = "K quickjoin" end }
+    end
+    items[#items + 1] = { label = "NAME TAGS   " .. onOff(EX.settings.tags), act = function() EX.settings.tags = not EX.settings.tags EX.saveSettings() end }
+    items[#items + 1] = { label = "HEALTH BARS   " .. onOff(EX.settings.bars), act = function() EX.settings.bars = not EX.settings.bars EX.saveSettings() end }
+    items[#items + 1] = { label = "BULLET FX   " .. onOff(EX.settings.fx), act = function() EX.settings.fx = not EX.settings.fx EX.saveSettings() end }
+    items[#items + 1] = { label = "SHARE MY SOUNDS   " .. onOff(EX.settings.share), act = function()
+        EX.settings.share = not EX.settings.share
+        EX.cmds[#EX.cmds + 1] = EX.settings.share and "K share_on" or "K share_off"
+        EX.saveSettings()
+    end }
+    items[#items + 1] = { label = "CLOSE", act = function() EX.menuOpen = false end }
+    return items
+end
+
+function EX.holoText(size)
+    local a = textActor("", size, EX.HOLO.R, EX.HOLO.G, EX.HOLO.B)
+    if a then pcall(function() a.TextRender:SetCastShadow(false) end) end
+    return a
+end
+
+function EX.setText(a, key, s)
+    if EX[key] ~= s then EX[key] = s a.TextRender:K2_SetText(FText(s)) end
+end
+
+function EX.hideMenu()
+    local list = { EX.menuTitle, EX.menuGlow, EX.menuScan }
+    for _, a in ipairs(EX.menuRows or {}) do list[#list + 1] = a end
+    for _, a in pairs(list) do if valid(a) then pcall(function() a:SetActorHiddenInGame(true) end) end end
+end
+
 function EX.wristTick()
+    if not EX.shareApplied then
+        EX.shareApplied = true
+        EX.cmds[#EX.cmds + 1] = EX.settings.share and "K share_on" or "K share_off"
+    end
     local hx, hy, hz = localHead[1], localHead[2], localHead[3]
     local lx, ly, lz = localLeft[1], localLeft[2], localLeft[3]
-    local dx, dy, dz = lx - hx, ly - hy, lz - hz
+    local lq, rq = EX.leftQ or { 0, 0, 0, 1 }, EX.rightQ or { 0, 0, 0, 1 }
+    -- the watch sits on the wrist, ~9 cm behind the controller's grip point
+    local wfx, wfy, wfz = qv(lq, 1, 0, 0)
+    local wx, wy, wz = lx - wfx * 9, ly - wfy * 9, lz - wfz * 9
+    -- right fingertip, ~8 cm in front of the right controller
+    local rfx, rfy, rfz = qv(rq, 1, 0, 0)
+    local tx, ty, tz = localRight[1] + rfx * 8, localRight[2] + rfy * 8, localRight[3] + rfz * 8
+    local faceYaw = math.atan(hy - wy, hx - wx) * RAD
+
+    -- tap the watch: open / close the menu
+    local tapping = dist2(tx, ty, tz, wx, wy, wz) < 7 * 7
+    if tapping and not EX.wasTapping and frameNo > (EX.tapCool or 0) then
+        EX.menuOpen = not EX.menuOpen
+        EX.tapCool = frameNo + 45
+        EX.menuT = 0
+    end
+    EX.wasTapping = tapping
+
+    -- status hologram (menu closed, looking at the watch)
+    local dx, dy, dz = wx - hx, wy - hy, wz - hz
     local d = math.sqrt(dx * dx + dy * dy + dz * dz)
     local fx, fy, fz = qrot(headQuat[1], headQuat[2], headQuat[3], headQuat[4], 1, 0, 0)
-    local looking = d > 15 and d < 55 and (dx * fx + dy * fy + dz * fz) / d > 0.9 and lz < hz
+    local looking = d > 15 and d < 60 and (dx * fx + dy * fy + dz * fz) / d > 0.88 and wz < hz
     EX.wristT = EX.wristT or 0
-    EX.wristT = looking and math.min(1, EX.wristT + 0.12) or math.max(0, EX.wristT - 0.15)
-    if EX.wristT <= 0 then
-        if valid(EX.wrist) and not EX.wristHidden then EX.wrist:SetActorHiddenInGame(true) EX.wristHidden = true end
+    EX.wristT = (looking and not EX.menuOpen) and math.min(1, EX.wristT + 0.12) or math.max(0, EX.wristT - 0.15)
+    if EX.wristT > 0 then
+        if not valid(EX.wrist) then EX.wrist = EX.holoText(2.0) EX.wristText = nil end
+        if EX.wrist then
+            local s
+            if status.state == "Connected" then
+                s = string.format("BT // LINK\n%s  %d ms\nhealth %d%%\ntap watch: menu", status.peer or "Player",
+                    math.floor(status.rtt or 0), math.floor((remoteHealth or 1) * 100 + 0.5))
+            else
+                s = "BT // LINK\n" .. ((status.state == "Idle" or status.state == "Disconnected") and "not in a game" or tostring(status.state)) .. "\ntap watch: menu"
+            end
+            EX.setText(EX.wrist, "wristText", s)
+            EX.wrist:SetActorHiddenInGame(false)
+            local e = 1 - (1 - EX.wristT) ^ 3
+            EX.wrist:K2_SetActorLocationAndRotation({ X = wx, Y = wy, Z = wz + 8 }, { Pitch = 0, Yaw = faceYaw, Roll = 0 }, false, {}, true)
+            EX.wrist:SetActorScale3D({ X = e, Y = e, Z = e })
+        end
+    elseif valid(EX.wrist) then
+        EX.wrist:SetActorHiddenInGame(true)
+    end
+
+    -- holographic menu
+    if not EX.menuOpen then
+        if EX.menuShown then EX.hideMenu() EX.menuShown = false end
         return
     end
-    if not valid(EX.wrist) then
-        EX.wrist = textActor("", 2.2, 235, 225, 215)
-        if not EX.wrist then return end
+    EX.menuShown = true
+    EX.menuT = math.min(1, (EX.menuT or 0) + 0.08)
+    local grow = 1 - (1 - EX.menuT) ^ 3
+    local items = EX.menuItems()
+    EX.menuRows = EX.menuRows or {}
+    if not valid(EX.menuTitle) then EX.menuTitle = EX.holoText(2.6) EX.menuTitleText = nil end
+    if not valid(EX.menuGlow) then
+        local g, c = lightActor("/Script/Engine.PointLight", "PointLightComponent")
+        EX.menuGlow = g
+        if c then pcall(function() c:SetIntensity(12) c:SetAttenuationRadius(45) c:SetCastShadows(false) c:SetLightColor({ R = 0.25, G = 0.85, B = 1, A = 1 }, true) end) end
     end
-    if EX.wristHidden ~= false then EX.wrist:SetActorHiddenInGame(false) EX.wristHidden = false end
-    if frameNo % 15 == 0 or EX.wristText == nil then
-        local s
-        if status.state == "Connected" then
-            s = string.format("BLOODTRAIL TOGETHER\n%s  -  %d ms\n%s\nthem: %d%% health", status.peer or "Player",
-                math.floor(status.rtt or 0), status.sameMap and "same map" or "different maps", math.floor((remoteHealth or 1) * 100 + 0.5))
-        elseif status.state == "Idle" or status.state == "Disconnected" then
-            s = "BLOODTRAIL TOGETHER\nnot in a game\npress F9 on the desktop"
-        else
-            s = "BLOODTRAIL TOGETHER\n" .. tostring(status.state)
+    if not valid(EX.menuScan) then EX.menuScan = meshActor("/Engine/BasicShapes/Cube.Cube", 0.002, 0.16, 0.002, 0.3, 0.9, 1.0) end
+    local rowH = 3.4
+    local baseZ = wz + 12
+    local top = baseZ + #items * rowH
+    -- title with a hologram flicker
+    local flick = (math.random() < 0.04) and 0.55 or 1
+    if valid(EX.menuTitle) then
+        EX.setText(EX.menuTitle, "menuTitleText", "BT // LINK" .. (status.state == "Connected" and ("   " .. math.floor(status.rtt or 0) .. " ms") or ""))
+        EX.menuTitle:SetActorHiddenInGame(false)
+        EX.menuTitle:K2_SetActorLocationAndRotation({ X = wx, Y = wy, Z = top + 1.5 }, { Pitch = 0, Yaw = faceYaw, Roll = 0 }, false, {}, true)
+        EX.menuTitle:SetActorScale3D({ X = grow * flick, Y = grow * flick, Z = grow })
+    end
+    -- rows
+    local hot = nil
+    for i, it in ipairs(items) do
+        local a = EX.menuRows[i]
+        if not valid(a) then
+            a = EX.holoText(2.1)
+            EX.menuRows[i] = a
+            EX["rowText" .. i], EX["rowCol" .. i] = nil, nil
         end
-        if s ~= EX.wristText then EX.wristText = s EX.wrist.TextRender:K2_SetText(FText(s)) end
+        if a then
+            local rz = top - i * rowH
+            local isHot = math.abs(tz - rz) < 1.7 and dist2(tx, ty, 0, wx, wy, 0) < 9 * 9
+            if isHot then hot = i end
+            local fired = EX.firedRow == i and frameNo < (EX.firedUntil or 0)
+            local col = fired and EX.HOLO_FIRE or isHot and EX.HOLO_HOT or EX.HOLO
+            EX.setText(a, "rowText" .. i, (isHot and "> " or "") .. it.label)
+            local ck = "rowCol" .. i
+            if EX[ck] ~= col then EX[ck] = col pcall(function() a.TextRender:SetTextRenderColor({ R = col.R, G = col.G, B = col.B, A = 255 }) end) end
+            a:SetActorHiddenInGame(false)
+            -- rows unfold one after another
+            local rg = math.max(0, math.min(1, grow * 1.6 - i * 0.08))
+            a:K2_SetActorLocationAndRotation({ X = wx, Y = wy, Z = baseZ + (rz - baseZ) * rg }, { Pitch = 0, Yaw = faceYaw, Roll = 0 }, false, {}, true)
+            a:SetActorScale3D({ X = math.max(0.01, rg), Y = math.max(0.01, rg), Z = math.max(0.01, rg) })
+        end
     end
-    local e = 1 - (1 - EX.wristT) ^ 3                     -- ease-out grow
-    local yaw = math.atan(hy - ly, hx - lx) * RAD
-    EX.wrist:K2_SetActorLocationAndRotation({ X = lx, Y = ly, Z = lz + 9 }, { Pitch = 0, Yaw = yaw, Roll = 0 }, false, {}, true)
-    EX.wrist:SetActorScale3D({ X = e, Y = e, Z = e })
+    for i = #items + 1, #EX.menuRows do if valid(EX.menuRows[i]) then EX.menuRows[i]:SetActorHiddenInGame(true) end end
+    -- activate: keep the fingertip on an entry for ~0.15 s
+    if hot and hot == EX.hotRow then
+        EX.hotFrames = (EX.hotFrames or 0) + 1
+        if EX.hotFrames == 14 and frameNo > (EX.actCool or 0) then
+            EX.actCool = frameNo + 40
+            EX.firedRow, EX.firedUntil = hot, frameNo + 12
+            pcall(items[hot].act)
+        end
+    else
+        EX.hotFrames = 0
+    end
+    EX.hotRow = hot
+    -- glow + a scan line sweeping over the panel
+    if valid(EX.menuGlow) then
+        EX.menuGlow:SetActorHiddenInGame(false)
+        EX.menuGlow:K2_SetActorLocation({ X = wx, Y = wy, Z = baseZ + (top - baseZ) / 2 }, false, {}, true)
+    end
+    if valid(EX.menuScan) then
+        local sweep = (frameNo % 120) / 120
+        EX.menuScan:SetActorHiddenInGame(false)
+        EX.menuScan:K2_SetActorLocationAndRotation({ X = wx, Y = wy, Z = baseZ + (top + 2 - baseZ) * sweep }, { Pitch = 0, Yaw = faceYaw, Roll = 0 }, false, {}, true)
+    end
 end
 
 -- A note in front of you when the connection stays weak for a few seconds (at most every 30 s).
@@ -2045,6 +2361,9 @@ local function handleGame(line)
         handleNpcEvent(kind, rest)
     elseif kind == "hp" then
         remoteHealth = tonumber(rest) or remoteHealth
+    elseif kind == "impact" then
+        local x, y, z, nx, ny, nz, surf = rest:match("^(%S+) (%S+) (%S+) (%S+) (%S+) (%S+) ?(%S*)")
+        if x then EX.onImpact(tonumber(x), tonumber(y), tonumber(z), tonumber(nx), tonumber(ny), tonumber(nz), surf) end
     elseif kind == "npcshot" then
         -- an NPC on the host fired at me: gunshot from that NPC, turn it towards me, maybe a hit
         local id, bone = rest:match("^(%d+) (%S+)")
@@ -2199,6 +2518,9 @@ local function frame()
     end
     for i = 1, #outbox do req[#req + 1] = outbox[i] end
     outbox = {}
+    for i = 1, #EX.cmds do req[#req + 1] = EX.cmds[i] end
+    EX.cmds = {}
+    pcall(EX.fxTick)
 
     local reply = exchange(table.concat(req, "\n") .. "\n")
     if reply then
