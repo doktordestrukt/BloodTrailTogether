@@ -65,6 +65,10 @@ int main(int argc, char** argv) {
   double last_sound = 0;
   std::string game_line;  // if set, send this game event (e.g. "hit 40 spine_02 ammo_9mm_b") every 10 s
   double last_game = 0;
+  // --fake-npc (host): pretend the host's game has one NPC walking back and forth 3 m in front of
+  // the origin, which dies 40 s after connecting. Exercises the client's NPC mirroring.
+  bool fake_npc = false;
+  double last_npc = 0, connected_at = -1;
   ImpairmentParams imp;
   double seconds = 0;
   for (int i = 2; i < argc; ++i) {
@@ -81,6 +85,7 @@ int main(int argc, char** argv) {
     else if (a == "--map") start_map = next();
     else if (a == "--sound") sound_path = next();
     else if (a == "--game") game_line = next();
+    else if (a == "--fake-npc") fake_npc = true;
     else if (arg1.empty()) arg1 = a;
     else arg2 = a;
   }
@@ -132,6 +137,19 @@ int main(int argc, char** argv) {
       e.f1 = 1.0f;
       ses.send_event(e);
       BTT_INFO("sent sound %s", sound_path.c_str());
+    }
+    if (fake_npc && ses.state() == SessionState::Connected && now - last_npc > 0.1) {
+      if (connected_at < 0) connected_at = now;
+      last_npc = now;
+      double t = now - connected_at;
+      double x = 300.0, y = 150.0 * std::sin(t * 0.3), vy = 45.0 * std::cos(t * 0.3);
+      int dead = t > 40.0 ? 1 : 0;
+      NetEvent e;
+      e.type = EventType::Game;
+      char b[160];
+      snprintf(b, sizeof(b), "npc 1 %.1f %.1f 92.0 180.0 0 %.0f %d", x, y, dead ? 0.0 : vy, dead);
+      e.s1 = b;
+      ses.send_event(e);
     }
     if (!game_line.empty() && ses.state() == SessionState::Connected && now - last_game > 10.0 && now - start > 15.0) {
       last_game = now;

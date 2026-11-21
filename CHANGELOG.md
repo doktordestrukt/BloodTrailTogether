@@ -4,6 +4,15 @@ Versioning: [Semantic Versioning](https://semver.org). The version lives in `CMa
 `release.json` and `Scripts/main.lua` (the release script refuses to build if they differ).
 The network protocol version (`kProtocolVersion`) changes only when old and new clients can no longer talk.
 
+## [0.2.0] - 2026-11-21
+### Added
+- Remote players appear as the game's full-body human NPC (AI disabled), walking with the player.
+- Player-vs-player damage through the game's own bullet/gore pipeline; victim's game applies the damage;
+  death ragdoll + respawn; melee counted only when your hand connects; knock-down recovery.
+- Protocol v2 (body transform, generic game events). Not compatible with 0.1.x.
+- Host-authoritative NPC sync (on by default, `[Gameplay] NpcSync`): host streams NPC position/yaw/speed/death
+  ~10x/s; client removes its own NPCs and shows mirrors; hits from either side replayed via EventReceiveDamageNPC.
+
 ## [0.1.0] - 2026-11-21 (preview)
 ### Tested
 - Live Unity Relay session (sign-in, allocation, join code, BIND, connect, data both ways).

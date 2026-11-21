@@ -11,7 +11,7 @@
 //   D <text>                                    log line from Lua
 // Reply lines (DLL -> Lua):
 //   CFG <shareRadiusCm> <devMode 0/1>           (only in reply to H)
-//   ST <state> <role> <quality 0-3> <rttMs> <lossPct> <simulated 0/1> <code|-> <peerName|->
+//   ST <state> <role> <quality 0-3> <rttMs> <lossPct> <simulated 0/1> <code|-> <peerName|-> <sameMap 0/1>
 //   RP - | RP head(7) left(7) right(7) body(7) flags     remote pose (interpolated)
 //   GX <game event line>                        game event from the other player's script
 //   TR <map package path>                       travel there (client follows host)
@@ -65,8 +65,8 @@ std::string lua_handle_request(const std::string& req) {
         BTT_INFO("bridge: Lua mod %s handshake", rest.c_str());
         char b[160];
         std::string self_test = a.settings.dev_mode ? token_safe(a.config.get("Dev.SelfTest", "-")) : "-";
-        snprintf(b, sizeof(b), "CFG %.1f %d %s\n", a.settings.share_sound_radius_cm, a.settings.dev_mode ? 1 : 0,
-                 self_test.c_str());
+        snprintf(b, sizeof(b), "CFG %.1f %d %s %d\n", a.settings.share_sound_radius_cm, a.settings.dev_mode ? 1 : 0,
+                 self_test.c_str(), a.config.get_bool("Gameplay.NpcSync", true) ? 1 : 0);
         out += b;
         break;
       }
@@ -126,9 +126,9 @@ std::string lua_handle_request(const std::string& req) {
 
   EngineSnapshot s = eng->snapshot();
   char st[512];
-  snprintf(st, sizeof(st), "ST %s %s %d %.0f %.1f %d %s %s\n", s.state.c_str(), s.role.empty() ? "-" : s.role.c_str(),
+  snprintf(st, sizeof(st), "ST %s %s %d %.0f %.1f %d %s %s %d\n", s.state.c_str(), s.role.empty() ? "-" : s.role.c_str(),
            s.quality, s.rtt_ms, s.loss_pct, s.simulated ? 1 : 0, s.join_code.empty() ? "-" : s.join_code.c_str(),
-           token_safe(s.peer_name).c_str());
+           token_safe(s.peer_name).c_str(), s.same_map ? 1 : 0);
   out += st;
 
   PoseFrame rp;

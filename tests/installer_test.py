@@ -77,7 +77,9 @@ def pack(entries):
 
 print("[A] no UE4SS, payload without UE4SS")
 game, win64 = make_game("libA")
-check(run("--install", game) != 0, "install refused")
+noue = os.path.join(WORK, "payload-no-ue4ss.bin")
+open(noue, "wb").write(pack([(0, "meta.ini", b"version=test\n"), (1, "ue4ss/Mods/BloodTrailTogether/Scripts/main.lua", b"-- test")]))
+check(run("--install", game, "--payload", noue) != 0, "install refused")
 check(not os.path.exists(os.path.join(win64, "ue4ss")), "nothing written")
 
 if REAL_WIN64:

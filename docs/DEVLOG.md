@@ -123,3 +123,9 @@ files in `BTVR\Binaries\Win64` were byte-identical (only ReShade later rewrote i
 - Game-style bullet into the remote body -> game gore (blood, chunks) + hit forwarded exactly once.
 ### Not verified
 - Arm IK following real controllers (no headset); costume differs per side (random NPC outfit).
+
+## 2026-11-21 — NPC sync verified, v0.2.0
+- Host side (game hosting Sandbox, SimPeer joined): 1607 NPC state events in ~100 s; a second NPC appeared
+  when the spawner made one; 4 bullet hits sent by the client were replayed on the real NPC, which died
+  (dead flag streamed). Client side (earlier run): own NPCs removed, mirror spawned, client hits forwarded.
+- NPC sync is a setting: `[Gameplay] NpcSync=1` (default on).

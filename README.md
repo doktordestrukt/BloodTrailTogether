@@ -5,7 +5,7 @@ normal Steam installs meet in the same map, see each other's head and hands, and
 gunfire and hand sounds. One player creates a session and reads out a short **join code**; the other
 types it in. No VPN, no Hamachi/Radmin, no port forwarding, no changes to the game executable.
 
-> **Status: v0.1.0 — early alpha.** Tested inside the real game in desktop mode (no headset): the
+> **Status: v0.2.0 — early alpha.** Tested inside the real game in desktop mode (no headset): the
 > remote avatar appears, the joining player follows the host into Sandbox and Raid maps, and shared
 > sounds play at the right position. Online sessions through Unity Relay were tested live
 > (sign-in, join code, connection). Not yet tested: a full VR session between two real players. Expect bugs.
@@ -27,12 +27,14 @@ Details: [INSTALLATION.md](INSTALLATION.md) · Problems: [TROUBLESHOOTING.md](TR
 | Feature | State |
 |---|---|
 | Unity Relay sessions with join codes (no port forwarding / VPN) | works: tested live against Unity Relay (create session, join with code, data both ways) |
-| Remote avatar: head + both controllers, interpolated, name tag with ping | works in game, checked in VR with the simulated player (primitive shapes for now) |
+| Other player shown as a full human body (the game's NPC model), name tag with ping | works in game |
+| Shooting each other: game gore on their body, real damage on their side, death ragdoll | works in game (tested with a simulated player) |
 | Both game modes (Sandbox and Arcade: Raid / Arenas) | client follows the host's map: verified in game for Sandbox and Raid level 1 |
 | Shared positional audio (gunshots, hand sounds near a player) | playback verified in game; capturing your own gunshots needs a VR test |
 | Disconnect / interruption detection, rejoin with the same code | implemented and tested |
 | Test without a second person (simulated player) | implemented and tested |
-| Shared NPCs / doors / raid state | **not yet** — see roadmap |
+| Shared NPCs (host's NPCs on both screens, hits and deaths synced) | works (tested with a simulated second player) |
+| Doors / raid objectives | not yet |
 
 ## Roadmap
 - In-game verification of avatar, map following and audio (v0.1.x)

@@ -7,7 +7,7 @@
 -- Everything that touches the game is wrapped in pcall: a failure disables that feature and is
 -- logged to UE4SS.log / BloodTrailTogether.log instead of crashing the game.
 
-local VERSION = "0.1.0"
+local VERSION = "0.2.0"
 local TAG = "[BloodTrailTogether] "
 local UEHelpers = require("UEHelpers")
 
@@ -552,21 +552,31 @@ local function isPuppet(actor)
     return valid(puppet) and valid(actor) and actor:GetFullName() == puppet:GetFullName()
 end
 
+local applyingRemoteHit = false  -- set while replaying the other player's hit, so it is not sent back
+local onNpcHit = nil             -- NPC sync handler (defined further down)
+
 local function installHitHook()
     if hitHookInstalled then return end
     hitHookInstalled = true
     local ok, err = pcall(RegisterHook, NPC_CLASS .. ":EventReceiveDamageNPC",
         function(ctx, HitResult, DamageCauserStruct, DamageCauserID, ExitWound)
+            if applyingRemoteHit then return end
             local npc = ctx:get()
-            if not isPuppet(npc) or puppetDead then return end
-            local bone, causer, hx, hy, hz = "", "", nil, nil, nil
+            local bone, causer, hx, hy, hz, nx, ny, nz = "", "", nil, nil, nil, 0, 0, 1
             pcall(function()
                 local hr = p(HitResult)
                 bone = hr.BoneName:ToString()
                 hx, hy, hz = hr.ImpactPoint.X, hr.ImpactPoint.Y, hr.ImpactPoint.Z
+                nx, ny, nz = hr.ImpactNormal.X, hr.ImpactNormal.Y, hr.ImpactNormal.Z
             end)
             pcall(function() causer = p(DamageCauserID):ToString() end)
-            if p(ExitWound) then return end  -- the entry wound already counted
+            local exitWound = p(ExitWound) and true or false
+            if not isPuppet(npc) then
+                if onNpcHit and hx then onNpcHit(npc, bone, hx, hy, hz, nx, ny, nz, causer, exitWound) end
+                return
+            end
+            if puppetDead then return end
+            if exitWound then return end  -- the entry wound already counted
             -- Only damage dealt by YOU counts: bullets (only players and NPC guns fire them; NPCs don't
             -- target this body) and melee only when one of your hands is right at the impact point.
             -- This drops blunt "hits" from the body falling, bumping walls or ragdoll head-slams.
@@ -619,7 +629,6 @@ local function spawnPuppet(x, y, z, yaw)
     pcall(function() a.DebugTextNPC:SetHiddenInGame(true, false) end)
     pcall(function() a.DebugTextLocal:SetHiddenInGame(true, false) end)
     installHitHook()
-    log("remote player body spawned: " .. a:GetFullName())
     return a
 end
 
@@ -642,6 +651,7 @@ local function updatePuppet(v)
             return false
         end
         puppet = a
+        log("remote player body spawned: " .. a:GetFullName())
     end
     if puppetDead then return true end
     -- Hit reactions can knock the body into ragdoll. Its owner is still alive, so get it back up
@@ -708,6 +718,159 @@ local function puppetRespawn()
     destroyPuppet()
 end
 
+------------------------------------------------------------------------------- NPC sync (host-authoritative)
+-- Host: its game runs the real NPCs (AI, spawning, health). ~10x/s it sends each NPC's position,
+--       yaw, speed and dead flag. Hits the host lands are replayed on the client's copies.
+-- Client: removes the NPCs its own game spawns and shows AI-less mirrors of the host's NPCs.
+--       Hits the client lands on a mirror show gore immediately and are replayed on the host's real
+--       NPC (which may die there; the mirror then ragdolls). Same gore pipeline on both sides.
+local NPC_SYNC_FRAMES = 9
+npcSyncEnabled = true  -- global on purpose: set from the CFG reply
+local npcIdOf = {}        -- host: actor full name -> id
+local npcActor = {}       -- host: id -> real NPC;  client: id -> mirror
+local mirrorIdOf = {}     -- client: mirror full name -> id
+local mirrorTarget = {}   -- client: id -> { x, y, z, yaw, vx, vy, dead, seen }
+local nextNpcId = 1
+local syncMap = nil
+
+local function syncActive()
+    return status.state == "Connected" and currentMap ~= nil and status.sameMap
+end
+
+local function resetNpcSync()
+    for _, a in pairs(npcActor) do
+        if status.role == "client" and valid(a) then pcall(function() a:K2_DestroyActor() end) end
+    end
+    npcIdOf, npcActor, mirrorIdOf, mirrorTarget, nextNpcId = {}, {}, {}, {}, 1
+end
+
+local function hostSyncTick()
+    local list = FindAllOf("BP_NPC_Man_C") or {}
+    local alive = {}
+    for _, a in ipairs(list) do
+        if valid(a) and not isPuppet(a) then
+            local name = a:GetFullName()
+            local id = npcIdOf[name]
+            if not id then
+                id = nextNpcId
+                nextNpcId = nextNpcId + 1
+                npcIdOf[name] = id
+                npcActor[id] = a
+                installHitHook()
+            end
+            alive[id] = true
+            local l = a:K2_GetActorLocation()
+            local r = a:K2_GetActorRotation()
+            local vx, vy = 0, 0
+            pcall(function() local v = a:GetVelocity() vx, vy = v.X, v.Y end)
+            local dead = 0
+            pcall(function() if a.Dead then dead = 1 end end)
+            sendGame(string.format("npc %d %.1f %.1f %.1f %.1f %.0f %.0f %d", id, l.X, l.Y, l.Z, r.Yaw, vx, vy, dead))
+        end
+    end
+    for id, a in pairs(npcActor) do
+        if not alive[id] then
+            sendGame("npcgone " .. id)
+            npcActor[id] = nil
+        end
+    end
+end
+
+local function clientSyncTick()
+    -- remove NPCs that this game spawned by itself (the host's game decides which NPCs exist)
+    if frameNo % (NPC_SYNC_FRAMES * 3) == 0 then
+        for _, a in ipairs(FindAllOf("BP_NPC_Man_C") or {}) do
+            if valid(a) and not isPuppet(a) and not mirrorIdOf[a:GetFullName()] then
+                pcall(function() a:K2_DestroyActor() end)
+            end
+        end
+    end
+    for id, t in pairs(mirrorTarget) do
+        local m = npcActor[id]
+        if not valid(m) then
+            local ok, a = pcall(spawnPuppet, t.x, t.y, t.z, t.yaw)
+            if ok and a then
+                m = a
+                npcActor[id] = a
+                mirrorIdOf[a:GetFullName()] = id
+                pcall(function() a.CapsuleComponent:SetCollisionEnabled(1) end)  -- NPCs block you like normal NPCs
+            end
+        end
+        if valid(m) and not t.deadApplied then
+            local okS, sim = pcall(function() return m.Mesh:IsSimulatingPhysics(FName("Pelvis")) end)
+            if t.dead then
+                t.deadApplied = true
+                pcall(function() m:RagdollStart() end)
+            elseif okS and sim then
+                -- knocked down by a hit reaction but alive on the host: get up again (wounds stay)
+                t.downSince = t.downSince or frameNo
+                if frameNo - t.downSince == 60 then pcall(function() m:RagdollEnd() end) end
+            else
+                t.downSince = nil
+                -- glide toward the host's position (updates arrive ~10x/s)
+                local l = m:K2_GetActorLocation()
+                local k = 0.25
+                local x, y, z = l.X + (t.x - l.X) * k, l.Y + (t.y - l.Y) * k, l.Z + (t.z - l.Z) * k
+                if dist2(l.X, l.Y, l.Z, t.x, t.y, t.z) > 300 * 300 then x, y, z = t.x, t.y, t.z end
+                m:K2_SetActorLocationAndRotation({ X = x, Y = y, Z = z }, { Pitch = 0, Yaw = t.yaw, Roll = 0 }, false, {}, true)
+                pcall(function() m.CharacterMovement.Velocity = { X = t.vx, Y = t.vy, Z = 0 } end)
+            end
+        end
+    end
+end
+
+local function npcSyncTick()
+    if not syncActive() then
+        if syncMap then resetNpcSync() syncMap = nil end
+        return
+    end
+    if syncMap ~= currentMap then resetNpcSync() syncMap = currentMap end
+    if status.role == "host" then
+        if frameNo % NPC_SYNC_FRAMES == 0 then hostSyncTick() end
+    else
+        clientSyncTick()
+    end
+end
+
+onNpcHit = function(npc, bone, x, y, z, nx, ny, nz, causer, exitWound)
+    if not syncActive() or causer == "" then return end
+    local name = npc:GetFullName()
+    local id = status.role == "host" and npcIdOf[name] or mirrorIdOf[name]
+    if not id then return end
+    if status.role == "client" and causer:find("melee", 1, true) then
+        -- same attribution rule as for players: only melee that your hands delivered
+        if not (dist2(x, y, z, localLeft[1], localLeft[2], localLeft[3]) < 3600 or dist2(x, y, z, localRight[1], localRight[2], localRight[3]) < 3600) then return end
+    end
+    local key = "npc" .. id .. "|" .. causer .. "|" .. bone .. "|" .. tostring(exitWound)
+    if lastHitFrame[key] and frameNo - lastHitFrame[key] < 20 then return end
+    lastHitFrame[key] = frameNo
+    sendGame(string.format("npchit %d %s %.1f %.1f %.1f %.3f %.3f %.3f %s %d", id, bone ~= "" and bone or "-", x, y, z, nx, ny, nz, causer, exitWound and 1 or 0))
+end
+
+local function handleNpcEvent(kind, rest)
+    if kind == "npc" and status.role == "client" then
+        local id, x, y, z, yaw, vx, vy, dead = rest:match("^(%d+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%d)")
+        id = tonumber(id)
+        if not id then return end
+        local t = mirrorTarget[id] or {}
+        t.x, t.y, t.z, t.yaw, t.vx, t.vy = tonumber(x), tonumber(y), tonumber(z), tonumber(yaw), tonumber(vx), tonumber(vy)
+        t.dead = dead == "1"
+        mirrorTarget[id] = t
+    elseif kind == "npcgone" and status.role == "client" then
+        local id = tonumber(rest)
+        if id and valid(npcActor[id]) then pcall(function() npcActor[id]:K2_DestroyActor() end) end
+        if id then npcActor[id], mirrorTarget[id] = nil, nil end
+    elseif kind == "npchit" then
+        local id, bone, x, y, z, nx, ny, nz, causer, ew = rest:match("^(%d+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%d)")
+        local target = npcActor[tonumber(id or "")]
+        if not valid(target) then return end
+        applyingRemoteHit = true
+        local ok, err = pcall(applyBulletHit, target, bone, tonumber(x), tonumber(y), tonumber(z), tonumber(nx), tonumber(ny), tonumber(nz), causer, ew == "1")
+        applyingRemoteHit = false
+        if not ok then log("replaying NPC hit failed: " .. tostring(err)) end
+    end
+end
+
 -- my own life, reported to the other player
 local myDeadReported = false
 local function watchMyHealth()
@@ -740,6 +903,8 @@ local function handleGame(line)
         showNote((status.peer or "The other player") .. " died")
     elseif kind == "alive" then
         puppetRespawn()
+    elseif kind == "npc" or kind == "npcgone" or kind == "npchit" then
+        handleNpcEvent(kind, rest)
     end
 end
 
@@ -750,9 +915,11 @@ local function parseReply(reply)
     for line in reply:gmatch("[^\n]+") do
         local kind = line:sub(1, 2)
         if kind == "ST" then
-            local st, role, q, rtt, loss, sim, code, peer = line:match("^ST (%S+) (%S+) (%d+) (%S+) (%S+) (%d) (%S+) (%S+)")
+            local st, role, q, rtt, loss, sim, code, peer, same = line:match("^ST (%S+) (%S+) (%d+) (%S+) (%S+) (%d) (%S+) (%S+) ?(%d?)")
             if st then
                 status.state, status.role, status.quality, status.rtt = st, role, tonumber(q), tonumber(rtt) or 0
+                status.sameMap = same == "1"
+                status.simulated = sim == "1"
                 status.peer = (peer ~= "-") and peer or "Player"
                 status.code = code
             end
@@ -786,7 +953,8 @@ local function parseReply(reply)
         elseif kind == "NT" then
             showNote(line:sub(4))
         elseif kind == "CF" then
-            local radius, _, st = line:match("^CFG (%S+) (%S+) ?(%S*)")
+            local radius, _, st, npc = line:match("^CFG (%S+) (%S+) ?(%S*) ?(%d?)")
+            npcSyncEnabled = npc ~= "0"
             if radius then shareRadius2 = tonumber(radius) ^ 2 end
             if st and st ~= "" and st ~= "-" then selfTest = st log("developer self-test: " .. st) end
         end
@@ -836,8 +1004,31 @@ local function frame()
     for i = 1, #pendingSounds do req[#req + 1] = pendingSounds[i] end
     pendingSounds = {}
     pcall(watchMyHealth)
+    -- NPC sync (config.ini [Gameplay] NpcSync=1, the default). The simulated player runs no game.
+    if not status.simulated and npcSyncEnabled then
+        local okN, errN = pcall(npcSyncTick)
+        if not okN and frameNo % 300 == 0 then log("NPC sync error: " .. tostring(errN)) end
+    end
     -- developer self-test: shoot the other player's body with a point-damage event
-    if selfTest == "hit" and valid(puppet) and frameNo % 600 == 0 then
+    -- developer self-test: go to the Sandbox map by itself (host side of NPC sync)
+    if selfTest:find("sandbox", 1, true) and frameNo == 600 and currentMap and not currentMap:find("Map_Sandbox", 1, true) then
+        travelTo("/Game/Maps/Sandbox/Map_Sandbox")
+    end
+    -- developer self-test: shoot the first mirrored NPC (client side of NPC sync)
+    if selfTest:find("npchit", 1, true) and frameNo % 450 == 0 then
+        for _, m in pairs(npcActor) do
+            if valid(m) and status.role == "client" then
+                local okT, errT = pcall(function()
+                    local hl = m.Mesh:GetSocketLocation(FName("spine_03"))
+                    local ok, why = applyBulletHit(m, "spine_03", hl.X, hl.Y, hl.Z, -1, 0, 0, "ammo_9mm_b", false)
+                    log("self-test: bullet into a mirrored NPC: " .. tostring(ok) .. " " .. tostring(why or ""))
+                end)
+                if not okT then log("self-test failed: " .. tostring(errT)) end
+                break
+            end
+        end
+    end
+    if selfTest:find("hit", 1, true) == 1 and valid(puppet) and frameNo % 600 == 0 then
         local okT, errT = pcall(function()
             -- a 9mm round into the chest, coming from the local player's direction
             local hl = puppet.Mesh:GetSocketLocation(FName("spine_03"))
