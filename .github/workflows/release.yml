@@ -1,0 +1,48 @@
+name: Release
+# Push a tag like v0.1.0 -> builds the public release and attaches it to a DRAFT GitHub release.
+# A human reviews and publishes the draft.
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned UE4SS and verify checksum
+        shell: pwsh
+        run: |
+          $rel = Get-Content release.json | ConvertFrom-Json
+          if (-not $rel.ue4ss.sha256) { throw "release.json ue4ss.sha256 is empty - pin the checksum first" }
+          New-Item -ItemType Directory -Force (Split-Path $rel.ue4ss.zip) | Out-Null
+          Invoke-WebRequest $rel.ue4ss.url -OutFile $rel.ue4ss.zip
+          $h = (Get-FileHash $rel.ue4ss.zip -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne $rel.ue4ss.sha256.ToLower()) { throw "UE4SS checksum mismatch: $h" }
+      - name: Tag matches version
+        shell: pwsh
+        run: |
+          $rel = Get-Content release.json | ConvertFrom-Json
+          if ("v$($rel.version)" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} != release.json $($rel.version)" }
+      - name: Build release
+        shell: cmd
+        run: python -I tools\make_release.py
+      - name: Unit tests
+        shell: cmd
+        run: |
+          call build.cmd
+          "%LOCALAPPDATA%\BTTBuild\dev\btt_tests.exe"
+      - name: Installer tests
+        shell: cmd
+        run: for %%f in (dist\*\BloodTrailTogether-Setup-*.exe) do python -I tests\installer_test.py "%%f" "%RUNNER_TEMP%\insttest"
+      - name: Draft GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $rel = Get-Content release.json | ConvertFrom-Json
+          $files = Get-ChildItem "dist/$($rel.version)/*" | ForEach-Object FullName
+          gh release create "${{ github.ref_name }}" $files --draft --title "BloodTrail Together ${{ github.ref_name }}" --notes-file CHANGELOG.md

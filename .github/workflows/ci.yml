@@ -1,0 +1,22 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (developer configuration)
+        shell: cmd
+        run: build.cmd
+      - name: Unit + integration tests
+        shell: cmd
+        run: "%LOCALAPPDATA%\\BTTBuild\\dev\\btt_tests.exe"
+      - name: Test release packaging + installer on fake game folders
+        shell: cmd
+        run: |
+          python -I tools\make_release.py --allow-missing-ue4ss --allow-empty-project
+          for %%f in (dist\*\BloodTrailTogether-Setup-*.exe) do python -I tests\installer_test.py "%%f" "%RUNNER_TEMP%\insttest"
