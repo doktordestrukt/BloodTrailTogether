@@ -7,7 +7,7 @@
 -- Everything that touches the game is wrapped in pcall: a failure disables that feature and is
 -- logged to UE4SS.log / BloodTrailTogether.log instead of crashing the game.
 
-local VERSION = "0.5.0"
+local VERSION = "0.5.1"
 local TAG = "[BloodTrailTogether] "
 local UEHelpers = require("UEHelpers")
 
@@ -1332,8 +1332,19 @@ local function updatePuppet(v)
         local okI, errI = pcall(function()
             P.pose:CopyPoseFromSkeletalComponent(P.mesh)
             solveHead(P, { v[4], v[5], v[6], v[7] }, P.bodyYaw)
-            if (flags & 1) ~= 0 then solveArm(P, "l", v[8], v[9], v[10], { v[11], v[12], v[13], v[14] }, P.bodyYaw) end
-            if (flags & 2) ~= 0 then solveArm(P, "r", v[15], v[16], v[17], { v[18], v[19], v[20], v[21] }, P.bodyYaw) end
+            -- A tracked hand goes exactly where its controller is. An untracked one (controller off,
+            -- asleep, not found yet) hangs relaxed at the side instead of the NPC's clasped-hands pose.
+            local function armAtSide(side)
+                local sh = boneT(P.pose, "upperarm_" .. side)
+                local by = P.bodyYaw * DEG
+                local s = side == "l" and -1 or 1
+                local rx, ry = -math.sin(by) * s, math.cos(by) * s       -- outward
+                local fx, fy = math.cos(by), math.sin(by)
+                local cx, cy, cz = sh[1] + rx * 7 + fx * 3, sh[2] + ry * 7 + fy * 3, sh[3] - 62
+                solveArm(P, side, cx, cy, cz, { rotToQuat(-88, P.bodyYaw, 0) }, P.bodyYaw)
+            end
+            if (flags & 1) ~= 0 then solveArm(P, "l", v[8], v[9], v[10], { v[11], v[12], v[13], v[14] }, P.bodyYaw) else armAtSide("l") end
+            if (flags & 2) ~= 0 then solveArm(P, "r", v[15], v[16], v[17], { v[18], v[19], v[20], v[21] }, P.bodyYaw) else armAtSide("r") end
             -- fingers: wrapped round a held item (index on the trigger), a fist while gripping, else relaxed
             for _, h in ipairs({ { "l", 4, 16 }, { "r", 8, 32 } }) do
                 local holding, gripping = (flags & h[2]) ~= 0, (flags & h[3]) ~= 0
@@ -2101,6 +2112,7 @@ function EX.saveSettings()
     end)
 end
 pcall(EX.loadSettings)
+EX.settings.share = true  -- sharing your sounds is how multiplayer is meant to sound: always on at start
 EX.shareApplied = false   -- tell the DLL the remembered "share my sounds" setting once
 
 EX.HOLO = { R = 70, G = 225, B = 255 }          -- hologram cyan

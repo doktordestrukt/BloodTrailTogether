@@ -263,7 +263,7 @@ void draw(HDC dc) {
   text(g, L"Share my sounds", RectF(426, 188, 120, 34), 12, rgba(190, 178, 172));
 
   // main actions
-  button(g, RectF(24, 236, 250, 46), idle ? L"HOST GAME" : L"HOSTING...", A_HOST, idle, true);
+  button(g, RectF(24, 236, 250, 46), idle ? L"HOST GAME" : s.role == "host" ? L"HOSTING" : L"IN A GAME", A_HOST, idle, true);
   button(g, RectF(286, 236, 250, 46), L"DISCONNECT", A_DISCONNECT, !idle, false);
 
   // server list
