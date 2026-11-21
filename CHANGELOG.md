@@ -4,6 +4,12 @@ Versioning: [Semantic Versioning](https://semver.org). The version lives in `CMa
 `release.json` and `Scripts/main.lua` (the release script refuses to build if they differ).
 The network protocol version (`kProtocolVersion`) changes only when old and new clients can no longer talk.
 
+## [0.7.0] - 2026-11-22
+### Added
+- Melee/unarmed NPCs (MaxAmmo 0) chase the joining player when closer (host: SimpleMoveToLocation; `npcmelee` hits applied on the client).
+- Scoreboard: kills (last-hitter within 5 s), headshots, deaths for both players (`score` event); shown on the watch.
+- Spectate while dead: CameraActor behind the living friend via SetViewTargetWithBlend; watch toggle.
+
 ## [0.6.1] - 2026-11-22
 ### Fixed
 - Remote body: ALS velocity-direction mode while walking forward/sideways (legs follow movement, aim offset follows the look); looking-direction mode when standing or walking backwards.

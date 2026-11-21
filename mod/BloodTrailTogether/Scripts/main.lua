@@ -7,7 +7,7 @@
 -- Everything that touches the game is wrapped in pcall: a failure disables that feature and is
 -- logged to UE4SS.log / BloodTrailTogether.log instead of crashing the game.
 
-local VERSION = "0.6.1"
+local VERSION = "0.7.0"
 local TAG = "[BloodTrailTogether] "
 local UEHelpers = require("UEHelpers")
 
@@ -897,6 +897,8 @@ local function installHitHook()
             local dmg = damageForHit(bone, causer)
             log(string.format("hit the other player: %s with %s -> %.0f%% of their health", bone, causer, dmg * 100))
             sendGame(string.format("hit %.2f %s %s", dmg, bone ~= "" and bone or "-", causer ~= "" and causer or "-"))
+            EX.lastPuppetHit = frameNo
+            if bone:lower():find("head") then EX.score.me.h = EX.score.me.h + 1 EX.scoreChanged() end
         end)
     log((ok and "hooked " or "could not hook ") .. "EventReceiveDamageNPC" .. (ok and "" or (": " .. tostring(err))))
 end
@@ -1642,6 +1644,7 @@ local function clientSyncTick()
             if t.dead then
                 if not t.deadApplied then
                     t.deadApplied = true
+                    pcall(EX.npcDied, id)
                     pcall(function() m:RagdollStart() end)
                 end
                 -- corpse follows the host's corpse (pulled by the pelvis, limbs stay physical),
@@ -1727,6 +1730,7 @@ onNpcHit = function(npc, bone, x, y, z, nx, ny, nz, causer, exitWound)
     local ox, oy, oz = qv(iq, x - bl.X, y - bl.Y, z - bl.Z)
     local lx, ly, lz = qv(iq, nx, ny, nz)
     sendGame(string.format("npchit %d %s %.2f %.2f %.2f %.3f %.3f %.3f %s %d", id, bone, ox, oy, oz, lx, ly, lz, causer, exitWound and 1 or 0))
+    if not exitWound then pcall(EX.myHit, id, bone) end
 end
 
 local function handleNpcEvent(kind, rest)
@@ -2090,7 +2094,7 @@ end
 -- the game's own bullet-hole effect for that surface (decal, dust, sound). Muzzle flashes: every
 -- shared gunshot (theirs, and NPC shots aimed at you) spawns the game's muzzle flash where it fired.
 EX.cmds = {}   -- "K ..." commands for the DLL (watch menu)
-EX.settings = { tags = true, bars = true, fx = true, share = true, subs = true }
+EX.settings = { tags = true, bars = true, fx = true, share = true, subs = true, spectate = true }
 EX.settingsVer = 1
 local PROJECTILE_CLASS = "/Game/BloodTrailWeapons/Projectiles/BP_BT_Projectile_Base.BP_BT_Projectile_Base_C"
 local BHOLE = "/Game/WeaponMaster/Decals/BP_BHole_%s.BP_BHole_%s_C"
@@ -2230,12 +2234,14 @@ function EX.npcBrain(id, a, dead)
     if dead then
         if not info.deadSeen then
             info.deadSeen = true
+            pcall(EX.npcDied, id)
             EX.deaths[#EX.deaths + 1] = { l.X, l.Y, l.Z, frameNo }
             if #EX.deaths > 64 then table.remove(EX.deaths, 1) end
         end
         return
     end
     if frameNo % 27 ~= 0 then return end
+    if status.role == "host" and syncActive() then pcall(EX.meleeBrain, id, a, info, l) end
     -- 1) out of ammo for more than 4 s (the game's own reload would have refilled it): scavenge
     local ammo, maxAmmo = nil, nil
     pcall(function() ammo, maxAmmo = a.Ammo, a.MaxAmmo end)
@@ -2470,6 +2476,106 @@ function EX.onNpcSay(id, path)
     if EX.settings.subs ~= false and text then EX.showSubtitle(m, text) end
 end
 
+------------------------------------------------------------------------------- melee NPCs go for the joining player (host)
+-- Unarmed / melee NPCs (no gun ammo) chase whichever player is closer. When the joining player is
+-- the closer one, the NPC walks to them, and once in reach swings every ~1.5 s; hits are applied
+-- in the joining player's game (punch/club damage), and their copy of the NPC turns to face them.
+function EX.meleeBrain(id, a, info, l)
+    if not valid(puppet) or puppetDead then return end
+    local maxAmmo = nil
+    pcall(function() maxAmmo = a.MaxAmmo end)
+    if type(maxAmmo) ~= "number" or maxAmmo > 0 then return end      -- armed: shoots (see npcshot)
+    local p = puppet:K2_GetActorLocation()
+    local dc = math.sqrt(dist2(l.X, l.Y, l.Z, p.X, p.Y, p.Z))
+    local dh = math.sqrt(dist2(l.X, l.Y, l.Z, localHead[1], localHead[2], localHead[3]))
+    if dc > 2500 or dc > dh then return end                          -- the host is closer: game AI handles it
+    if dc > 160 then
+        EX.moveTo(a, p.X, p.Y, p.Z)
+    elseif frameNo - (info.lastSwing or -1000) > 135 then
+        info.lastSwing = frameNo
+        local bone = "miss"
+        if math.random() < 0.55 then
+            local r = math.random()
+            bone = r < 0.2 and "head" or r < 0.8 and "spine_03" or "upperarm_l"
+        end
+        sendGame(string.format("npcmelee %d %s", id, bone))
+    end
+end
+
+------------------------------------------------------------------------------- scoreboard
+-- Kills (NPCs and the other player), headshots and deaths for both players, on the watch.
+-- A kill counts for whoever hit that NPC last (within 5 s of its death).
+EX.score = { me = { k = 0, h = 0, d = 0 }, them = { k = 0, h = 0, d = 0 } }
+EX.lastHitBy = {}       -- npc id -> frame of my last hit
+EX.lastPuppetHit = -100000
+
+function EX.scoreChanged()
+    local m = EX.score.me
+    sendGame(string.format("score %d %d %d", m.k, m.h, m.d))
+end
+
+function EX.myHit(id, bone)
+    if id then EX.lastHitBy[id] = frameNo end
+    if (bone or ""):lower():find("head") then
+        EX.score.me.h = EX.score.me.h + 1
+        EX.scoreChanged()
+    end
+end
+
+function EX.npcDied(id)
+    local t = EX.lastHitBy[id]
+    if t and frameNo - t < 450 then
+        EX.lastHitBy[id] = nil
+        EX.score.me.k = EX.score.me.k + 1
+        EX.scoreChanged()
+        showNote("Kill  (" .. EX.score.me.k .. ")")
+    end
+end
+
+function EX.scoreLine()
+    local m, t = EX.score.me, EX.score.them
+    return string.format("you  %dK %dHS %dD   |   them  %dK %dHS %dD", m.k, m.h, m.d, t.k, t.h, t.d)
+end
+
+------------------------------------------------------------------------------- spectate while dead
+-- When you die and the other player is alive, your view smoothly moves to a camera floating behind
+-- and above them, following them gently (no sudden moves, for VR comfort). It returns to your own
+-- body when you respawn. Can be switched off on the watch.
+function EX.spectateTick(myDead)
+    local want = myDead and EX.settings.spectate and valid(puppet) and not puppetDead and status.state == "Connected"
+    local pc = getPC()
+    if not pc then return end
+    if want then
+        EX.deadFrames = (EX.deadFrames or 0) + 1
+        if EX.deadFrames < 90 then return end                    -- let the game's own death moment play
+        if not valid(EX.specCam) then
+            EX.specCam = spawnActor("/Script/Engine.CameraActor")
+            if not EX.specCam then return end
+        end
+        local p = puppet:K2_GetActorLocation()
+        local r = puppet:K2_GetActorRotation()
+        local fx, fy = math.cos(r.Yaw * DEG), math.sin(r.Yaw * DEG)
+        local tx, ty, tz = p.X - fx * 220, p.Y - fy * 220, p.Z + 130
+        local c = EX.specPos or { tx, ty, tz }
+        c = { c[1] + (tx - c[1]) * 0.04, c[2] + (ty - c[2]) * 0.04, c[3] + (tz - c[3]) * 0.04 }
+        EX.specPos = c
+        local yaw = math.atan(p.Y - c[2], p.X - c[1]) * RAD
+        EX.specCam:K2_SetActorLocationAndRotation({ X = c[1], Y = c[2], Z = c[3] }, { Pitch = -15, Yaw = yaw, Roll = 0 }, false, {}, true)
+        if not EX.spectating then
+            EX.spectating = true
+            pcall(function() pc:SetViewTargetWithBlend(EX.specCam, 0.8, 4, 2, false) end)
+            showNote("Spectating " .. (status.peer or "your friend"))
+        end
+    else
+        EX.deadFrames = 0
+        if EX.spectating then
+            EX.spectating, EX.specPos = false, nil
+            local pawn = getPawn()
+            if pawn then pcall(function() pc:SetViewTargetWithBlend(pawn, 0.4, 4, 2, false) end) end
+        end
+    end
+end
+
 ------------------------------------------------------------------------------- watch: status + hologram menu
 -- Look at your raised left hand: a status hologram (who, ping, health) appears above the watch.
 -- Tap the watch with your right hand: a holographic settings menu opens above it. Touch an entry
@@ -2514,6 +2620,8 @@ function EX.menuItems()
     end
     items[#items + 1] = { label = "NAME TAGS   " .. onOff(EX.settings.tags), act = function() EX.settings.tags = not EX.settings.tags EX.saveSettings() end }
     items[#items + 1] = { label = "HEALTH BARS   " .. onOff(EX.settings.bars), act = function() EX.settings.bars = not EX.settings.bars EX.saveSettings() end }
+    items[#items + 1] = { label = EX.scoreLine(), act = function() end }
+    items[#items + 1] = { label = "SPECTATE WHEN DEAD   " .. onOff(EX.settings.spectate), act = function() EX.settings.spectate = not EX.settings.spectate EX.saveSettings() end }
     items[#items + 1] = { label = "SUBTITLES   " .. onOff(EX.settings.subs), act = function() EX.settings.subs = not EX.settings.subs EX.saveSettings() end }
     items[#items + 1] = { label = "BULLET FX   " .. onOff(EX.settings.fx), act = function() EX.settings.fx = not EX.settings.fx EX.saveSettings() end }
     items[#items + 1] = { label = "SHARE MY SOUNDS   " .. onOff(EX.settings.share), act = function()
@@ -2580,8 +2688,8 @@ function EX.wristTick()
         if EX.wrist then
             local s
             if status.state == "Connected" then
-                s = string.format("BT // LINK\n%s  %d ms\nhealth %d%%\ntap watch: menu", status.peer or "Player",
-                    math.floor(status.rtt or 0), math.floor((remoteHealth or 1) * 100 + 0.5))
+                s = string.format("BT // LINK\n%s  %d ms\nhealth %d%%\n%s\ntap watch: menu", status.peer or "Player",
+                    math.floor(status.rtt or 0), math.floor((remoteHealth or 1) * 100 + 0.5), EX.scoreLine())
             else
                 s = "BT // LINK\n" .. ((status.state == "Idle" or status.state == "Disconnected") and "not in a game" or tostring(status.state)) .. "\ntap watch: menu"
             end
@@ -2702,9 +2810,12 @@ local function watchMyHealth()
         EX.hpSent, EX.hpAt = frac, frameNo
         sendGame(string.format("hp %.3f", frac))
     end
+    EX.myDead = hp <= 0
     if hp <= 0 and not myDeadReported then
         myDeadReported = true
         sendGame("dead")
+        EX.score.me.d = EX.score.me.d + 1
+        EX.scoreChanged()
     elseif hp > 0 and myDeadReported then
         myDeadReported = false
         sendGame("alive")
@@ -2736,6 +2847,10 @@ local function handleGame(line)
             end
         end
     elseif kind == "dead" then
+        if frameNo - EX.lastPuppetHit < 450 then
+            EX.score.me.k = EX.score.me.k + 1
+            EX.scoreChanged()
+        end
         puppetDie()
         showNote((status.peer or "The other player") .. " died")
     elseif kind == "alive" then
@@ -2758,6 +2873,16 @@ local function handleGame(line)
         handleNpcEvent(kind, rest)
     elseif kind == "hp" then
         remoteHealth = tonumber(rest) or remoteHealth
+    elseif kind == "score" then
+        local k, h, d = rest:match("^(%d+) (%d+) (%d+)")
+        if k then EX.score.them = { k = tonumber(k), h = tonumber(h), d = tonumber(d) } end
+    elseif kind == "npcmelee" then
+        local id, bone = rest:match("^(%d+) (%S+)")
+        id = tonumber(id or "")
+        if id and mirrorTarget[id] then mirrorTarget[id].aimUntil = frameNo + 90 end
+        if bone and bone ~= "miss" then
+            handleGame(string.format("hit %.2f %s melee_blunt", damageForHit(bone, "melee_blunt"), bone))
+        end
     elseif kind == "npcsay" then
         local id, path = rest:match("^(%d+) (%S+)")
         if id then EX.onNpcSay(tonumber(id), path) end
@@ -2945,6 +3070,7 @@ local function frame()
     pcall(updateNote)
     pcall(EX.wristTick)
     pcall(EX.connectionWarning)
+    pcall(EX.spectateTick, EX.myDead == true)
     if not status.simulated then
         pcall(EX.voiceTick)
         pcall(EX.subtitleTick)
