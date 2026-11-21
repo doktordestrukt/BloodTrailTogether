@@ -7,7 +7,7 @@
 -- Everything that touches the game is wrapped in pcall: a failure disables that feature and is
 -- logged to UE4SS.log / BloodTrailTogether.log instead of crashing the game.
 
-local VERSION = "0.3.0"
+local VERSION = "0.4.0"
 local TAG = "[BloodTrailTogether] "
 local UEHelpers = require("UEHelpers")
 
@@ -525,6 +525,9 @@ local function ensureAvatar(name)
             left = meshActor("/Engine/BasicShapes/Cube.Cube", 0.14, 0.08, 0.04, 0.8, 0.75, 0.7),
             right = meshActor("/Engine/BasicShapes/Cube.Cube", 0.14, 0.08, 0.04, 0.8, 0.75, 0.7),
             tag = textActor(name or "Player", 10, 230, 60, 60),
+            -- health bar under the name tag (dark back plate + red fill)
+            hpBg = meshActor("/Engine/BasicShapes/Cube.Cube", 0.004, 0.32, 0.035, 0.03, 0.03, 0.03),
+            hpFg = meshActor("/Engine/BasicShapes/Cube.Cube", 0.006, 0.30, 0.025, 0.75, 0.05, 0.05),
         }
     end)
     if not ok or not (avatar and avatar.head and avatar.left and avatar.right) then
@@ -551,6 +554,7 @@ local function hideAvatar()
 end
 
 local lastTagName = nil
+local remoteHealth, shownHealth = 1, 1   -- other player's health share (from their "hp" events)
 -- shapes=false: the full body model is shown, so only the name tag is used from this avatar.
 local function updateAvatar(v, peerName, quality, rtt, shapes)
     if avatarDisabled then return end
@@ -560,7 +564,9 @@ local function updateAvatar(v, peerName, quality, rtt, shapes)
     end
     if avatar.hidden or avatar.shapes ~= shapes then
         for k, a in pairs(avatar) do
-            if k ~= "hidden" and k ~= "shapes" and valid(a) then a:SetActorHiddenInGame(not shapes and k ~= "tag") end
+            if k ~= "hidden" and k ~= "shapes" and valid(a) then
+                a:SetActorHiddenInGame(not shapes and k ~= "tag" and k ~= "hpBg" and k ~= "hpFg")
+            end
         end
         avatar.hidden = false
         avatar.shapes = shapes
@@ -576,6 +582,19 @@ local function updateAvatar(v, peerName, quality, rtt, shapes)
     if valid(avatar.tag) then
         local yaw = math.atan(localHead[2] - v[2], localHead[1] - v[1]) * RAD
         avatar.tag:K2_SetActorLocationAndRotation({ X = v[1], Y = v[2], Z = v[3] + 28 }, { Pitch = 0, Yaw = yaw, Roll = 0 }, false, {}, true)
+        -- health bar: fills from the left, shrinks smoothly as the other player is hurt
+        pcall(function()
+            local frac = math.max(0, math.min(1, remoteHealth or 1))
+            shownHealth = shownHealth + (frac - shownHealth) * 0.15
+            local ry = yaw * DEG
+            local rx, rY = -math.sin(ry), math.cos(ry)          -- the bar's left-right direction
+            local bz = v[3] + 22
+            avatar.hpBg:K2_SetActorLocationAndRotation({ X = v[1], Y = v[2], Z = bz }, { Pitch = 0, Yaw = yaw, Roll = 0 }, false, {}, true)
+            local w = 0.30 * math.max(0.001, shownHealth)
+            local shift = (0.30 - w) * 50                         -- keep the fill's left edge in place
+            avatar.hpFg:K2_SetActorLocationAndRotation({ X = v[1] + rx * shift, Y = v[2] + rY * shift, Z = bz }, { Pitch = 0, Yaw = yaw, Roll = 0 }, false, {}, true)
+            avatar.hpFg:SetActorScale3D({ X = 0.006, Y = w, Z = 0.025 })
+        end)
         local label = string.format("%s  %dms", peerName, rtt)
         if label ~= lastTagName and frameNo % 45 == 0 then
             lastTagName = label
@@ -1403,6 +1422,7 @@ local function hostSyncTick()
                 npcIdOf[name] = id
                 npcActor[id] = a
                 installHitHook()
+                EX.installFireHook()
             end
             alive[id] = true
             local dead = false
@@ -1494,9 +1514,13 @@ local function clientSyncTick()
                     local k = 0.25
                     local x, y, z = l.X + (t.x - l.X) * k, l.Y + (t.y - l.Y) * k, l.Z + (t.z - l.Z) * k
                     if dist2(l.X, l.Y, l.Z, t.x, t.y, t.z) > 300 * 300 then x, y, z = t.x, t.y, t.z end
-                    m:K2_SetActorLocationAndRotation({ X = x, Y = y, Z = z }, { Pitch = 0, Yaw = t.yaw, Roll = 0 }, false, {}, true)
+                    local yaw = t.yaw
+                    if t.aimUntil and frameNo < t.aimUntil then   -- shooting at me
+                        yaw = math.atan(localHead[2] - y, localHead[1] - x) * RAD
+                    end
+                    m:K2_SetActorLocationAndRotation({ X = x, Y = y, Z = z }, { Pitch = 0, Yaw = yaw, Roll = 0 }, false, {}, true)
                     pcall(function() m.CharacterMovement.Velocity = { X = t.vx, Y = t.vy, Z = 0 } end)
-                    if t.ctrl and valid(t.ctrl) then pcall(function() t.ctrl:SetControlRotation({ Pitch = 0, Yaw = t.yaw, Roll = 0 }) end) end
+                    if t.ctrl and valid(t.ctrl) then pcall(function() t.ctrl:SetControlRotation({ Pitch = 0, Yaw = yaw, Roll = 0 }) end) end
                     if t.cm then syncMovementBase(m, t.cm) end
                 end
             end
@@ -1862,6 +1886,93 @@ function EX.handle(kind, rest)
     end
 end
 
+------------------------------------------------------------------------------- NPCs attack both players
+-- The game's NPC AI can only target its own player (WENDIGOREF is typed as the player pawn), so it
+-- always aims at the host. When an NPC on the host fires while the joining player is the closer
+-- target, the shot is treated as fired at the joining player: their game plays the gunshot from
+-- that NPC, turns the NPC towards them and rolls the hit (better odds up close).
+EX.NPC_GUNSHOT = "/Game/Audio/gunfire_remix/Glock/Glock_Fire_Indoor_rmx_Cue.Glock_Fire_Indoor_rmx_Cue"
+
+function EX.installFireHook()
+    if EX.fireHooked then return end
+    EX.fireHooked = true
+    local ok, err = pcall(RegisterHook, NPC_CLASS .. ":Fire_pistol", function(ctx)
+        local okF, e = pcall(EX.onNpcFire, ctx:get())
+        if not okF then log("NPC shot handling failed: " .. tostring(e)) end
+    end)
+    log((ok and "hooked " or "could not hook ") .. "NPC Fire_pistol" .. (ok and "" or (": " .. tostring(err))))
+end
+
+function EX.onNpcFire(npc)
+    if status.role ~= "host" or not syncActive() or not valid(puppet) or puppetDead or not valid(npc) or isPuppet(npc) then return end
+    local id = npcIdOf[npc:GetFullName()]
+    if not id then return end
+    local l = npc:K2_GetActorLocation()
+    local p = puppet:K2_GetActorLocation()
+    local dc = math.sqrt(dist2(l.X, l.Y, l.Z, p.X, p.Y, p.Z))
+    local dh = math.sqrt(dist2(l.X, l.Y, l.Z, localHead[1], localHead[2], localHead[3]))
+    if dc > 3000 or dc > dh * 0.85 then return end          -- the host is the closer target
+    local chance = math.max(0.12, math.min(0.5, 0.55 - dc / 4000))
+    local bone = "miss"
+    if math.random() < chance then
+        local r = math.random()
+        bone = r < 0.1 and "head" or r < 0.75 and "spine_03" or r < 0.875 and "upperarm_l" or "thigh_r"
+    end
+    sendGame(string.format("npcshot %d %s", id, bone))
+end
+
+------------------------------------------------------------------------------- in-headset status
+-- Wrist panel: raise your left hand in front of your face and look at it - a small status panel
+-- (session, player, ping, maps) pops up above the hand with a quick grow animation.
+function EX.wristTick()
+    local hx, hy, hz = localHead[1], localHead[2], localHead[3]
+    local lx, ly, lz = localLeft[1], localLeft[2], localLeft[3]
+    local dx, dy, dz = lx - hx, ly - hy, lz - hz
+    local d = math.sqrt(dx * dx + dy * dy + dz * dz)
+    local fx, fy, fz = qrot(headQuat[1], headQuat[2], headQuat[3], headQuat[4], 1, 0, 0)
+    local looking = d > 15 and d < 55 and (dx * fx + dy * fy + dz * fz) / d > 0.9 and lz < hz
+    EX.wristT = EX.wristT or 0
+    EX.wristT = looking and math.min(1, EX.wristT + 0.12) or math.max(0, EX.wristT - 0.15)
+    if EX.wristT <= 0 then
+        if valid(EX.wrist) and not EX.wristHidden then EX.wrist:SetActorHiddenInGame(true) EX.wristHidden = true end
+        return
+    end
+    if not valid(EX.wrist) then
+        EX.wrist = textActor("", 2.2, 235, 225, 215)
+        if not EX.wrist then return end
+    end
+    if EX.wristHidden ~= false then EX.wrist:SetActorHiddenInGame(false) EX.wristHidden = false end
+    if frameNo % 15 == 0 or EX.wristText == nil then
+        local s
+        if status.state == "Connected" then
+            s = string.format("BLOODTRAIL TOGETHER\n%s  -  %d ms\n%s\nthem: %d%% health", status.peer or "Player",
+                math.floor(status.rtt or 0), status.sameMap and "same map" or "different maps", math.floor((remoteHealth or 1) * 100 + 0.5))
+        elseif status.state == "Idle" or status.state == "Disconnected" then
+            s = "BLOODTRAIL TOGETHER\nnot in a game\npress F9 on the desktop"
+        else
+            s = "BLOODTRAIL TOGETHER\n" .. tostring(status.state)
+        end
+        if s ~= EX.wristText then EX.wristText = s EX.wrist.TextRender:K2_SetText(FText(s)) end
+    end
+    local e = 1 - (1 - EX.wristT) ^ 3                     -- ease-out grow
+    local yaw = math.atan(hy - ly, hx - lx) * RAD
+    EX.wrist:K2_SetActorLocationAndRotation({ X = lx, Y = ly, Z = lz + 9 }, { Pitch = 0, Yaw = yaw, Roll = 0 }, false, {}, true)
+    EX.wrist:SetActorScale3D({ X = e, Y = e, Z = e })
+end
+
+-- A note in front of you when the connection stays weak for a few seconds (at most every 30 s).
+function EX.connectionWarning()
+    if status.state == "Connected" and (status.quality or 3) <= 1 then
+        EX.weakFrames = (EX.weakFrames or 0) + 1
+        if EX.weakFrames == 270 and frameNo - (EX.warnedAt or -100000) > 2700 then
+            EX.warnedAt = frameNo
+            showNote(string.format("Weak connection to %s (%d ms)", status.peer or "the other player", math.floor(status.rtt or 0)))
+        end
+    else
+        EX.weakFrames = 0
+    end
+end
+
 -- my own life, reported to the other player
 local myDeadReported = false
 local function watchMyHealth()
@@ -1869,6 +1980,15 @@ local function watchMyHealth()
     if not valid(pawn) then return end
     local okH, hp = pcall(function() return pawn.PlayerHealth end)
     if not okH or type(hp) ~= "number" then return end
+    -- my health share for the other player's health bar (sent when it changes by 2 % or more)
+    local maxHp = 250
+    pcall(function() maxHp = pawn.playerhealthmax end)
+    if type(maxHp) ~= "number" or maxHp <= 0 then maxHp = 250 end
+    local frac = math.max(0, math.min(1, hp / maxHp))
+    if not EX.hpSent or math.abs(frac - EX.hpSent) >= 0.02 or frameNo - (EX.hpAt or 0) > 1800 then
+        EX.hpSent, EX.hpAt = frac, frameNo
+        sendGame(string.format("hp %.3f", frac))
+    end
     if hp <= 0 and not myDeadReported then
         myDeadReported = true
         sendGame("dead")
@@ -1923,6 +2043,21 @@ local function handleGame(line)
         end
     elseif kind == "npc" or kind == "npcgone" or kind == "npchit" or kind == "npcbody" then
         handleNpcEvent(kind, rest)
+    elseif kind == "hp" then
+        remoteHealth = tonumber(rest) or remoteHealth
+    elseif kind == "npcshot" then
+        -- an NPC on the host fired at me: gunshot from that NPC, turn it towards me, maybe a hit
+        local id, bone = rest:match("^(%d+) (%S+)")
+        id = tonumber(id or "")
+        local m = id and npcActor[id]
+        if valid(m) then
+            local l = m:K2_GetActorLocation()
+            playRemoteSound(EX.NPC_GUNSHOT, l.X, l.Y, l.Z + 50, 1, 1)
+            if mirrorTarget[id] then mirrorTarget[id].aimUntil = frameNo + 60 end
+        end
+        if bone and bone ~= "miss" then
+            handleGame(string.format("hit %.2f %s npc_9mm", damageForHit(bone, "ammo_9mm_b") * 0.6, bone))
+        end
     elseif kind == "vision" or kind == "npcdrag" or kind == "npcdrop" or kind == "prop" then
         EX.handle(kind, rest)
     end
@@ -2071,6 +2206,8 @@ local function frame()
         if not ok then log("reply handling failed: " .. tostring(err)) end
     end
     pcall(updateNote)
+    pcall(EX.wristTick)
+    pcall(EX.connectionWarning)
 end
 
 ------------------------------------------------------------------------------- start

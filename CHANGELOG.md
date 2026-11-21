@@ -4,6 +4,15 @@ Versioning: [Semantic Versioning](https://semver.org). The version lives in `CMa
 `release.json` and `Scripts/main.lua` (the release script refuses to build if they differ).
 The network protocol version (`kProtocolVersion`) changes only when old and new clients can no longer talk.
 
+## [0.4.0] - 2026-11-21
+### Added
+- Server list (Unity Lobby): hosting lists your game publicly; others join with a click. Listings carry the Relay join code, map, mod version and protocol; heartbeat every 10 s, removed on join/close.
+- Redesigned F9 window: custom-drawn with GDI+, animated (hover glow, pulsing status light, ping meter, sliding server rows, toasts).
+- Players on different mod versions with the same network protocol can join each other; otherwise the row offers UPDATE (opens the download page) and a joiner gets a clear "update needed" message. A mismatched joiner no longer ends the host's session.
+- NPCs attack both players: when an NPC on the host fires and the joining player is the closer target, the shot is replayed at them (gunshot from that NPC, NPC turns to them, distance-based hit chance).
+- Health bar over the other player, wrist status panel (look at your raised left hand), weak-connection warning.
+- Installer icon.
+
 ## [0.3.0] - 2026-11-21
 ### Fixed
 - Remote body legs crossing/spinning: bodies get an AIController carrying the look rotation (ALS looking-direction mode) and the movement component's last-update transform is kept current (foot locking).

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(BloodTrailTogether VERSION 0.3.0 LANGUAGES CXX)
+project(BloodTrailTogether VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,6 +32,7 @@ add_library(btt_lib STATIC
   src/relay/relay_messages.cpp
   src/relay/relay_api.cpp
   src/relay/relay_transport.cpp
+  src/relay/lobby.cpp
   src/sync/pose_codec.cpp
   src/sync/interp.cpp
   src/engine/net_engine.cpp
@@ -47,7 +48,7 @@ add_library(btt_core SHARED
   src/bridge/lua_bridge.cpp
   src/bridge/control_window.cpp
 )
-target_link_libraries(btt_core PRIVATE btt_lib user32 gdi32 shell32 comctl32)
+target_link_libraries(btt_core PRIVATE btt_lib user32 gdi32 gdiplus shell32 comctl32)
 
 add_executable(btt_simpeer tools/simpeer/main.cpp)
 target_link_libraries(btt_simpeer PRIVATE btt_lib)
@@ -59,7 +60,8 @@ target_link_libraries(btt_tests PRIVATE btt_lib)
 set(BTT_PAYLOAD "" CACHE FILEPATH "payload.bin produced by tools/make_release.py")
 set(INSTALLER_RC ${CMAKE_BINARY_DIR}/installer.rc)
 file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}/installer/installer.manifest" _manifest)
-set(_rc "1 24 \"${_manifest}\"\n")
+file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}/assets/app.ico" _icon)
+set(_rc "1 24 \"${_manifest}\"\n1 ICON \"${_icon}\"\n")
 if(BTT_PAYLOAD)
   file(TO_CMAKE_PATH "${BTT_PAYLOAD}" _payload)
   string(APPEND _rc "101 RCDATA \"${_payload}\"\n")

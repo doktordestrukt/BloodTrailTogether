@@ -378,8 +378,19 @@ void Session::deliver_rel(const std::vector<uint8_t>& body, double now) {
     std::string ver = r.str();
     if (!r.ok()) return;
     if (proto != kProtocolVersion) {
-      error_ = "version mismatch: other player runs protocol " + std::to_string(proto) + " (" + ver +
-               "), you run " + std::to_string(kProtocolVersion) + " (" + mod_version_ + ")";
+      if (role_ == Role::Host) {
+        // Tell the joiner which version we run (so their game can say "update"), but keep the
+        // session open for a player with a matching version.
+        if (type == M_HELLO) send_hello(true);
+        BTT_WARN("session: %s tried to join with BloodTrail Together %s (protocol %u) - needs %s", name.c_str(),
+                 ver.c_str(), proto, mod_version_.c_str());
+        return;
+      }
+      bool they_newer = proto > kProtocolVersion;
+      error_ = "Update needed: " + (name.empty() ? std::string("the host") : name) + " runs BloodTrail Together " + ver +
+               ", you have " + mod_version_ + ". " +
+               (they_newer ? "Install the newer version from the download page."
+                           : "They need to update - send them the download page.");
       BTT_ERROR("%s", error_.c_str());
       state_ = SessionState::Disconnected;
       return;
