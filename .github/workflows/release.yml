@@ -17,7 +17,7 @@ jobs:
         shell: pwsh
         run: |
           $rel = Get-Content release.json | ConvertFrom-Json
-          if (-not $rel.ue4ss.sha256) { throw "release.json ue4ss.sha256 is empty - pin the checksum first" }
+          if (-not $rel.ue4ss.sha256) { Write-Host "No UE4SS checksum pinned: building without bundled UE4SS"; "UE4SS_FLAG=--allow-missing-ue4ss" >> $env:GITHUB_ENV; exit 0 }
           New-Item -ItemType Directory -Force (Split-Path $rel.ue4ss.zip) | Out-Null
           Invoke-WebRequest $rel.ue4ss.url -OutFile $rel.ue4ss.zip
           $h = (Get-FileHash $rel.ue4ss.zip -Algorithm SHA256).Hash.ToLower()
@@ -29,7 +29,7 @@ jobs:
           if ("v$($rel.version)" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} != release.json $($rel.version)" }
       - name: Build release
         shell: cmd
-        run: python -I tools\make_release.py
+        run: python -I tools\make_release.py %UE4SS_FLAG%
       - name: Unit tests
         shell: cmd
         run: |
@@ -45,4 +45,6 @@ jobs:
         run: |
           $rel = Get-Content release.json | ConvertFrom-Json
           $files = Get-ChildItem "dist/$($rel.version)/*" | ForEach-Object FullName
-          gh release create "${{ github.ref_name }}" $files --draft --title "BloodTrail Together ${{ github.ref_name }}" --notes-file CHANGELOG.md
+          gh release view "${{ github.ref_name }}" *> $null
+          if ($LASTEXITCODE -eq 0) { gh release upload "${{ github.ref_name }}" $files --clobber }
+          else { gh release create "${{ github.ref_name }}" $files --draft --title "BloodTrail Together ${{ github.ref_name }}" --notes-file CHANGELOG.md }

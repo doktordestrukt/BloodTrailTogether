@@ -4,7 +4,13 @@ Versioning: [Semantic Versioning](https://semver.org). The version lives in `CMa
 `release.json` and `Scripts/main.lua` (the release script refuses to build if they differ).
 The network protocol version (`kProtocolVersion`) changes only when old and new clients can no longer talk.
 
-## [0.1.0] - unreleased
+## [0.1.0] - 2026-11-21 (preview)
+### Tested
+- Live Unity Relay session (sign-in, allocation, join code, BIND, connect, data both ways).
+- In game: remote avatar, map following into Sandbox and Raid, shared sound playback; avatar seen in VR.
+### Known limitations
+- UE4SS is not bundled: install it first.
+- Remote player is shown with simple shapes; no player-vs-player damage, NPC/gore/ragdoll sync yet.
 ### Added
 - Unity Relay transport implemented from the published wire protocol (BIND/HMAC-SHA256, PING,
   CONNECT_REQUEST/ACCEPTED, RELAY, DISCONNECT, CLOSE, error handling) plus anonymous Unity

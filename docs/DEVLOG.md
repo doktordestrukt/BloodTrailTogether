@@ -86,3 +86,11 @@ files in `BTVR\Binaries\Win64` were byte-identical (only ReShade later rewrote i
 - Dev UDP transport binds to 127.0.0.1 (no Windows Firewall prompt).
 - `dev.ini` `AutoStart=` (sim_mirror | sim_orbit | udp_host | udp_join) + 5-second diagnostic stats lines.
 - SimPeer `--map` and `--sound` options; installer no longer logs each line twice.
+
+## 2026-11-21 — Live Unity Relay verified
+- Project `3a2b7ffb-8a1a-40da-be13-571dfac0220a` (public id) added to `release.json`.
+- SimPeer host + SimPeer joiner through the real service: anonymous sign-in OK, allocation
+  (us-central1), BIND accepted (confirms HMAC-SHA256 input + little-endian nonce from Unity's reference
+  client), join code `77GDFN`, ACCEPTED, handshake < 1 s, maps/notices/sounds exchanged both ways.
+- Found: two SimPeers echoed each other's sounds endlessly (test-tool bug); echoes are now tagged and never re-echoed.
+- The user tested in VR: the simulated player's head, visor, hands and name tag render correctly in the headset.

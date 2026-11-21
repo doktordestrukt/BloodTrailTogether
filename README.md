@@ -7,8 +7,8 @@ types it in. No VPN, no Hamachi/Radmin, no port forwarding, no changes to the ga
 
 > **Status: v0.1.0 — early alpha.** Tested inside the real game in desktop mode (no headset): the
 > remote avatar appears, the joining player follows the host into Sandbox and Raid maps, and shared
-> sounds play at the right position. Not yet tested: headset/controller tracking in VR, and online play
-> through Unity Relay. Expect bugs.
+> sounds play at the right position. Online sessions through Unity Relay were tested live
+> (sign-in, join code, connection). Not yet tested: a full VR session between two real players. Expect bugs.
 
 ![Installer](docs/screenshots/installer.png) ![Multiplayer window](docs/screenshots/multiplayer-window.png)
 
@@ -16,7 +16,8 @@ types it in. No VPN, no Hamachi/Radmin, no port forwarding, no changes to the ga
 
 1. Download **`BloodTrailTogether-Setup-vX.Y.Z.exe`** from [Releases](../../releases).
 2. Run it. It finds BloodTrail in your Steam libraries (or click **Browse…**).
-3. Click **Install**.
+3. Click **Install**. You need [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) already installed in BloodTrail
+   (v0.1.0 does not bundle it yet; the installer tells you if it is missing).
 4. Start BloodTrail through Steam as usual.
 5. Press **F9** in game for the multiplayer window → **Create Session** (host) or type the code → **Join Session**.
 
@@ -26,8 +27,8 @@ Details: [INSTALLATION.md](INSTALLATION.md) · Problems: [TROUBLESHOOTING.md](TR
 
 | Feature | State |
 |---|---|
-| Unity Relay sessions with join codes (no port forwarding / VPN) | implemented; protocol checked against Unity's reference client; tested against a local mock relay. Live Unity test pending the project id |
-| Remote avatar: head + both controllers, interpolated, name tag with ping | works in game (desktop test); VR controller tracking untested |
+| Unity Relay sessions with join codes (no port forwarding / VPN) | works: tested live against Unity Relay (create session, join with code, data both ways) |
+| Remote avatar: head + both controllers, interpolated, name tag with ping | works in game, checked in VR with the simulated player (primitive shapes for now) |
 | Both game modes (Sandbox and Arcade: Raid / Arenas) | client follows the host's map: verified in game for Sandbox and Raid level 1 |
 | Shared positional audio (gunshots, hand sounds near a player) | playback verified in game; capturing your own gunshots needs a VR test |
 | Disconnect / interruption detection, rejoin with the same code | implemented and tested |

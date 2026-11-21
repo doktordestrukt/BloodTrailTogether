@@ -115,6 +115,7 @@ int main(int argc, char** argv) {
     if (!ses.join_code().empty() && ses.join_code() != printed_code) {
       printed_code = ses.join_code();
       printf("\n  JOIN CODE: %s\n\n", printed_code.c_str());
+      BTT_INFO("JOIN CODE: %s", printed_code.c_str());
     }
     ses.set_local_pose(scripted_pose(pattern, now - start));
     if (!sound_path.empty() && ses.state() == SessionState::Connected && now - last_sound > 5.0) {
@@ -142,8 +143,10 @@ int main(int argc, char** argv) {
         }
       } else if (e.type == EventType::Sound) {
         BTT_INFO("peer sound: %s at (%.0f, %.0f, %.0f) vol %.2f", e.s1.c_str(), e.v.x, e.v.y, e.v.z, e.f0);
+        if (e.s2 == "echo") continue;  // never echo an echo (two SimPeers would ping-pong forever)
         NetEvent echo = e;
         echo.t_ms = 0;
+        echo.s2 = "echo";
         echo.v = scripted_pose(pattern, now - start).head.p;
         ses.send_event(echo);
         ++sounds_echoed;
