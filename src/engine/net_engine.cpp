@@ -4,6 +4,8 @@
 #include <mmsystem.h>
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 
 #include "core/log.h"
 #include "core/util.h"
@@ -142,6 +144,8 @@ void NetEngine::start_simulated_peer(SimMode mode) {
   bot_anchor_set_ = false;
   bot_start_ = now_sec();
   bot_map_.clear();
+  bot_hp_ = 1.0f;
+  bot_dead_ = false;
   BTT_INFO("engine: simulated player started (%s)", mode == SimMode::Mirror ? "mirror" : "orbit");
 }
 
@@ -335,7 +339,9 @@ void NetEngine::sim_tick(double now) {
       f.body = tf(seen.body);
       f.heldL = tf(seen.heldR);
       f.heldR = tf(seen.heldL);
-      f.flags = (uint8_t)((seen.flags & 3) | ((seen.flags & 4) << 1) | ((seen.flags & 8) >> 1));
+      // left/right swap for 'holding' (4/8) and 'grip held' (16/32)
+      f.flags = (uint8_t)((seen.flags & 3) | ((seen.flags & 4) << 1) | ((seen.flags & 8) >> 1) | ((seen.flags & 16) << 1) |
+                          ((seen.flags & 32) >> 1));
     } else {
       // Orbit: walk a 2 m circle around the anchor, look at the centre, wave hands.
       double t = now - bot_start_;
@@ -370,9 +376,55 @@ void NetEngine::sim_tick(double now) {
     } else if (e.type == EventType::Sound) {
       NetEvent echo = e;
       echo.t_ms = 0;
-      if (bot_anchor_set_) echo.v = f.head.p;
+      if (bot_anchor_set_) {
+        // play it where the mirrored copy of that sound is (its gun, its hand), not at its head
+        float yaw = yaw_of(bot_anchor_.q);
+        Vec3 pivot = {bot_anchor_.p.x - std::cos(yaw) * 75.0f, bot_anchor_.p.y - std::sin(yaw) * 75.0f, 0};
+        Vec3 r = rotz({e.v.x - pivot.x, e.v.y - pivot.y, e.v.z}, 3.14159265f);
+        echo.v = {r.x + pivot.x, r.y + pivot.y, r.z};
+      }
       bot_echo_.push_back({now + 0.75, echo});
+    } else if (e.type == EventType::Game) {
+      const std::string& g = e.s1;
+      auto swap_side = [](std::string s, size_t at) {
+        if (at < s.size()) s[at] = s[at] == 'L' ? 'R' : s[at] == 'R' ? 'L' : s[at];
+        return s;
+      };
+      if (g.rfind("held ", 0) == 0 || g.rfind("heldpart ", 0) == 0) {
+        // the mirror holds what you hold, in the other hand
+        NetEvent m;
+        m.type = EventType::Game;
+        m.s1 = swap_side(g, g.find(' ') + 1);
+        bot_->send_event(m);
+      } else if (g.rfind("hit ", 0) == 0 && !bot_dead_) {
+        // take the damage like a player: health bar, death, respawn after 6 s
+        bot_hp_ -= (float)atof(g.c_str() + 4);
+        NetEvent m;
+        m.type = EventType::Game;
+        if (bot_hp_ <= 0.001f) {
+          bot_dead_ = true;
+          bot_respawn_at_ = now + 6.0;
+          m.s1 = "hp 0.000";
+          bot_->send_event(m);
+          m.s1 = "dead";
+        } else {
+          char b[32];
+          snprintf(b, sizeof(b), "hp %.3f", bot_hp_);
+          m.s1 = b;
+        }
+        bot_->send_event(m);
+      }
     }
+  }
+  if (bot_dead_ && now >= bot_respawn_at_) {
+    bot_dead_ = false;
+    bot_hp_ = 1.0f;
+    NetEvent m;
+    m.type = EventType::Game;
+    m.s1 = "alive";
+    bot_->send_event(m);
+    m.s1 = "hp 1.000";
+    bot_->send_event(m);
   }
   while (!bot_echo_.empty() && bot_echo_.front().due <= now) {
     bot_->send_event(bot_echo_.front().ev);

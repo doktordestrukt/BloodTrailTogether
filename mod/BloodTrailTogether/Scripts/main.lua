@@ -7,7 +7,7 @@
 -- Everything that touches the game is wrapped in pcall: a failure disables that feature and is
 -- logged to UE4SS.log / BloodTrailTogether.log instead of crashing the game.
 
-local VERSION = "0.6.0"
+local VERSION = "0.6.1"
 local TAG = "[BloodTrailTogether] "
 local UEHelpers = require("UEHelpers")
 
@@ -1313,6 +1313,12 @@ local function updatePuppet(v)
 
     -- Never fall over / never be dragged while the owner is alive: any ragdoll (hit reaction,
     -- someone grabbing the body) is undone the same frame.
+    -- Bullet hit reactions blend physics into single limbs (the body flung around): physics stays
+    -- fully off on this body while its owner is alive; wounds and blood still show.
+    pcall(function()
+        P.mesh:SetAllBodiesSimulatePhysics(false)
+        P.mesh:SetAllBodiesPhysicsBlendWeight(0.0, false)
+    end)
     local okS, sim = pcall(function() return P.mesh:IsSimulatingPhysics(FName("Pelvis")) end)
     if okS and sim then
         pcall(function()
@@ -1332,6 +1338,19 @@ local function updatePuppet(v)
         -- The game's own animation turns the body: when standing it steps round after the head
         -- (turn in place), when moving it faces the look direction and strafes / backpedals.
         if frameNo % 60 == 0 then EX.silenceController(P.ctrl) end
+        -- Walking: legs go where you move, upper body/head turn to where you look (ALS "velocity
+        -- direction" + aim offset). Walking backwards or standing: face the look direction
+        -- (backpedal, turn on the spot). v0.3-0.6 always faced the look direction while moving.
+        local mode = 1
+        if speed > 40 then
+            local mv = math.atan(P.velY or 0, P.velX or 0) * RAD
+            if math.abs(normAxis(mv - headYaw)) < 100 then mode = 0 end
+        end
+        if mode ~= P.rotMode then
+            P.rotMode = mode
+            pcall(function() puppet:BPI_Set_RotationMode(mode) end)
+            pcall(function() puppet.DesiredRotationMode = mode puppet.RotationMode = mode end)
+        end
         pcall(function() P.ctrl:SetControlRotation({ Pitch = headPitch, Yaw = headYaw, Roll = 0 }) end)
         local ry = puppet:K2_GetActorRotation().Yaw
         -- safety net: never leave the body facing far away from the head for long
@@ -2311,33 +2330,21 @@ end
 -- the joining player heard no NPC voices at all).
 -- The game has no subtitle text for these recordings; captions come from each recording's line
 -- type (and its own words where the file name has them).
+-- No transcripts exist for these recordings, so the caption says what KIND of line it is (in
+-- brackets) unless the file name carries the actual words. v0.6 showed invented sentences, which
+-- often didn't match what was said.
 EX.CAPTIONS = {
-    HeardSusNoise = { "Huh? What was that?", "Did you hear that?", "Something's there..." },
-    HeardDangerNoise = { "What was that?!", "That was a gunshot!", "Someone's here!" },
-    IWillInvestigate = { "I'll go check it out.", "I'm gonna go see what that was." },
-    YouGoInvestigate = { "Go check that out.", "You, go take a look." },
-    ComradeGoingToInvestigate = { "He's going to look.", "Cover him." },
-    MidSearchSolo = { "Where are you...", "I know you're here." },
-    MidSearchAccompanied = { "Keep looking!", "He's around here, I know it." },
-    PlayerSightedSolo = { "There you are!", "I see you!" },
-    PlayerSightedAccompanied = { "There he is!", "Contact! Over there!" },
-    PlayerIsNear = { "He's close...", "He's right here somewhere." },
-    LostSightOfPlayer = { "Where'd he go?", "Lost him!" },
-    BattleCrySolo = { "Come on then!", "You're dead!" },
-    BattleCryAccompanied = { "Get him!", "Take him down!" },
-    CallForHelp = { "Help! Over here!", "I need help!" },
-    ReplyCallForHelp = { "Coming!", "On my way!" },
-    ImHit = { "I'm hit!", "Argh, I'm hit!" },
-    SuccessfulHit = { "Got him!", "Hit him!" },
-    Reloading = { "Reloading!", "Cover me, reloading!" },
-    Taunt = { "Is that all you've got?", "Come out!" },
-    VictorySolo = { "Got you.", "That's it." },
-    VictoryAccompanied = { "We got him!", "He's down!" },
-    MournComradeDeath = { "No... not him...", "They got him..." },
-    ShockAtComradeDeath = { "Oh god!", "He's dead!" },
-    BegForLife = { "Please, don't shoot!", "Please... I have a family!", "Don't kill me!" },
-    Yes = { "Yes." }, No = { "No!" },
-    IdleSolo = { "[mutters]" }, IdleAccompanied = { "[chatting]" },
+    HeardSusNoise = { "[heard something]" }, HeardDangerNoise = { "[heard danger]" },
+    IWillInvestigate = { "[going to check it out]" }, YouGoInvestigate = { "[sends someone to check]" },
+    ComradeGoingToInvestigate = { "[a friend is checking it out]" }, MidSearchSolo = { "[searching]" },
+    MidSearchAccompanied = { "[searching with others]" }, PlayerSightedSolo = { "[spotted you]" },
+    PlayerSightedAccompanied = { "[calls out your position]" }, PlayerIsNear = { "[senses you nearby]" },
+    LostSightOfPlayer = { "[lost sight of you]" }, BattleCrySolo = { "[battle cry]" }, BattleCryAccompanied = { "[rallies the others]" },
+    CallForHelp = { "[calls for help]" }, ReplyCallForHelp = { "[answers the call for help]" }, ImHit = { "[I'm hit]" },
+    SuccessfulHit = { "[got a hit]" }, Reloading = { "[reloading]" }, Taunt = { "[taunts]" },
+    VictorySolo = { "[gloats]" }, VictoryAccompanied = { "[celebrates]" }, MournComradeDeath = { "[mourns a friend]" },
+    ShockAtComradeDeath = { "[shocked by a death]" }, BegForLife = { "[begs for his life]" },
+    Yes = { "[yes]" }, No = { "[no]" }, IdleSolo = { "[mutters]" }, IdleAccompanied = { "[chatting]" },
     Pain = { "[groans]" }, Pain_Grunt = { "[grunts]" }, Pain_Scream = { "[screams]" },
     Pain_Death = { "[dying]" }, Pain_Gargle = { "[gurgling]" }, Pain_AgonizedGasp = { "[gasps]" },
     Pain_Moan = { "[moans]" }, Breath_Heavy = { "[heavy breathing]" }, Breath_FuckedUp = { "[ragged breathing]" },
@@ -2551,7 +2558,9 @@ function EX.wristTick()
     local faceYaw = math.atan(hy - wy, hx - wx) * RAD
 
     -- tap the watch: open / close the menu
-    local tapping = dist2(tx, ty, tz, wx, wy, wz) < 7 * 7
+    -- tap: right fingertip or right hand near the watch or the left controller (generous)
+    local tapping = dist2(tx, ty, tz, wx, wy, wz) < 11 * 11 or dist2(tx, ty, tz, lx, ly, lz) < 11 * 11
+        or dist2(localRight[1], localRight[2], localRight[3], wx, wy, wz) < 9 * 9
     if tapping and not EX.wasTapping and frameNo > (EX.tapCool or 0) then
         EX.menuOpen = not EX.menuOpen
         EX.tapCool = frameNo + 45
@@ -2563,7 +2572,7 @@ function EX.wristTick()
     local dx, dy, dz = wx - hx, wy - hy, wz - hz
     local d = math.sqrt(dx * dx + dy * dy + dz * dz)
     local fx, fy, fz = qrot(headQuat[1], headQuat[2], headQuat[3], headQuat[4], 1, 0, 0)
-    local looking = d > 15 and d < 60 and (dx * fx + dy * fy + dz * fz) / d > 0.88 and wz < hz
+    local looking = d > 10 and d < 80 and (dx * fx + dy * fy + dz * fz) / d > 0.72 and wz < hz + 5
     EX.wristT = EX.wristT or 0
     EX.wristT = (looking and not EX.menuOpen) and math.min(1, EX.wristT + 0.12) or math.max(0, EX.wristT - 0.15)
     if EX.wristT > 0 then
@@ -2579,7 +2588,7 @@ function EX.wristTick()
             EX.setText(EX.wrist, "wristText", s)
             EX.wrist:SetActorHiddenInGame(false)
             local e = 1 - (1 - EX.wristT) ^ 3
-            EX.wrist:K2_SetActorLocationAndRotation({ X = wx, Y = wy, Z = wz + 8 }, { Pitch = 0, Yaw = faceYaw, Roll = 0 }, false, {}, true)
+            EX.wrist:K2_SetActorLocationAndRotation({ X = wx, Y = wy, Z = wz + 5 }, { Pitch = 0, Yaw = faceYaw, Roll = 0 }, false, {}, true)
             EX.wrist:SetActorScale3D({ X = e, Y = e, Z = e })
         end
     elseif valid(EX.wrist) then

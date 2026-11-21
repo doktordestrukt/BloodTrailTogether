@@ -109,6 +109,9 @@ class NetEngine {
   struct Delayed { double due; NetEvent ev; };
   std::deque<Delayed> bot_echo_;
   std::string bot_map_;
+  float bot_hp_ = 1.0f;        // share of max health; the bot dies and respawns like a player
+  bool bot_dead_ = false;
+  double bot_respawn_at_ = 0;
 
   // game state mirrors
   PoseFrame local_pose_{};

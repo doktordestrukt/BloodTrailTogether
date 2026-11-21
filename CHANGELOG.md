@@ -4,6 +4,15 @@ Versioning: [Semantic Versioning](https://semver.org). The version lives in `CMa
 `release.json` and `Scripts/main.lua` (the release script refuses to build if they differ).
 The network protocol version (`kProtocolVersion`) changes only when old and new clients can no longer talk.
 
+## [0.6.1] - 2026-11-22
+### Fixed
+- Remote body: ALS velocity-direction mode while walking forward/sideways (legs follow movement, aim offset follows the look); looking-direction mode when standing or walking backwards.
+- No hit-reaction physics on a living remote body (SetAllBodiesSimulatePhysics(false) + blend weight 0 each frame).
+- Subtitles: bracketed line-type descriptions instead of invented sentences; filename words kept.
+- Watch: wider tap and look tolerances, hologram closer to the wrist.
+### Simulated player
+- Mirrors held items (held/heldpart echoed with sides swapped) and grip flags; takes hits, dies, respawns after 6 s; echoed sounds come from the mirrored position.
+
 ## [0.6.0] - 2026-11-21
 ### Fixed
 - Host crash with live AI NPCs (0.3.0-0.5.1): the pose-copy body is not used on the host while AI NPCs are present (game animation + look-at instead); pose mesh moved to its own holder actor.
