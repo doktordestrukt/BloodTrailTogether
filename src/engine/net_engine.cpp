@@ -197,6 +197,15 @@ void NetEngine::send_world(const std::string& key, const std::string& value) {
   session_->send_event(std::move(e));
 }
 
+void NetEngine::send_game(const std::string& line) {
+  std::lock_guard<std::mutex> lk(mu_);
+  if (!session_ || session_->state() != SessionState::Connected) return;
+  NetEvent e;
+  e.type = EventType::Game;
+  e.s1 = line;
+  session_->send_event(std::move(e));
+}
+
 bool NetEngine::remote_pose(PoseFrame& out) {
   std::lock_guard<std::mutex> lk(mu_);
   if (!session_) return false;
@@ -232,6 +241,9 @@ void NetEngine::handle_event(const NetEvent& e, double now) {
       push_cmd({GameCommand::Ui, "world " + e.s1 + " " + e.s2});
       break;
     case EventType::Request:
+      break;
+    case EventType::Game:
+      push_cmd({GameCommand::Ui, "game " + e.s1});
       break;
   }
   (void)now;
@@ -320,6 +332,7 @@ void NetEngine::sim_tick(double now) {
       f.head = tf(seen.head);
       f.left = tf(seen.right);
       f.right = tf(seen.left);
+      f.body = tf(seen.body);
     } else {
       // Orbit: walk a 2 m circle around the anchor, look at the centre, wave hands.
       double t = now - bot_start_;
@@ -333,6 +346,7 @@ void NetEngine::sim_tick(double now) {
         return Xform{{head.x + off.x, head.y + off.y, head.z + off.z}, hq};
       };
       f.head = {head, hq};
+      f.body = {{head.x, head.y, c.z - 165.0f}, hq};  // floor under the bot
       f.left = hand(-1, 0);
       f.right = hand(1, 1.5f);
     }

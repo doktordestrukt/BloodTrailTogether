@@ -11,7 +11,7 @@
 
 namespace btt {
 
-constexpr uint16_t kProtocolVersion = 1;
+constexpr uint16_t kProtocolVersion = 2;  // 2: body transform in poses, Game events
 
 enum class Role : uint8_t { Host = 1, Client = 2 };
 
@@ -25,6 +25,7 @@ enum class EventType : uint8_t {
   Notice = 3,   // s1 = text shown to the other player
   World = 4,    // s1 = key (actor/system id), s2 = value  (host-authoritative world state)
   Request = 5,  // s1 = request name, s2 = argument (client -> host)
+  Game = 6,     // s1 = opaque game-script event line (hits, deaths, NPC sync); interpreted by main.lua
 };
 
 struct NetEvent {

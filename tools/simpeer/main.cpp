@@ -47,6 +47,7 @@ static PoseFrame scripted_pose(const std::string& pattern, double t) {
   };
   f.left = hand(-1, 0);
   f.right = hand(1, wave);
+  f.body = {{head.x, head.y, head.z - 165.0f}, q};  // floor point under the head (same as the game sends)
   return f;
 }
 
@@ -62,6 +63,8 @@ int main(int argc, char** argv) {
   std::string start_map = "/Game/Maps/Beta/Map_Beta_Basement";  // as host, the map the game should follow to
   std::string sound_path;  // if set, emit this sound asset from the bot's head every 5 s
   double last_sound = 0;
+  std::string game_line;  // if set, send this game event (e.g. "hit 40 spine_02 ammo_9mm_b") every 10 s
+  double last_game = 0;
   ImpairmentParams imp;
   double seconds = 0;
   for (int i = 2; i < argc; ++i) {
@@ -77,6 +80,7 @@ int main(int argc, char** argv) {
     else if (a == "--log") log_path = next();
     else if (a == "--map") start_map = next();
     else if (a == "--sound") sound_path = next();
+    else if (a == "--game") game_line = next();
     else if (arg1.empty()) arg1 = a;
     else arg2 = a;
   }
@@ -129,6 +133,14 @@ int main(int argc, char** argv) {
       ses.send_event(e);
       BTT_INFO("sent sound %s", sound_path.c_str());
     }
+    if (!game_line.empty() && ses.state() == SessionState::Connected && now - last_game > 10.0 && now - start > 15.0) {
+      last_game = now;
+      NetEvent e;
+      e.type = EventType::Game;
+      e.s1 = game_line;
+      ses.send_event(e);
+      BTT_INFO("sent game event: %s", game_line.c_str());
+    }
     std::vector<NetEvent> evs;
     ses.pop_events(evs);
     for (auto& e : evs) {
@@ -150,6 +162,8 @@ int main(int argc, char** argv) {
         echo.v = scripted_pose(pattern, now - start).head.p;
         ses.send_event(echo);
         ++sounds_echoed;
+      } else if (e.type == EventType::Game) {
+        BTT_INFO("peer game event: %s", e.s1.c_str());
       } else if (e.type == EventType::Notice) {
         BTT_INFO("peer notice: %s", e.s1.c_str());
       }

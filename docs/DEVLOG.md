@@ -94,3 +94,32 @@ files in `BTVR\Binaries\Win64` were byte-identical (only ReShade later rewrote i
   client), join code `77GDFN`, ACCEPTED, handshake < 1 s, maps/notices/sounds exchanged both ways.
 - Found: two SimPeers echoed each other's sounds endlessly (test-tool bug); echoes are now tagged and never re-echoed.
 - The user tested in VR: the simulated player's head, visor, hands and name tag render correctly in the headset.
+
+## 2026-11-21 — Full-body players and player-vs-player
+### Runtime reverse engineering (tools/devmods/BTTDevDump, dev only)
+- Sandbox player pawn is `WendigoVrChar_C` (VRExpansion `VRCharacter`), not BP_VRCharacter.
+  Health: `PlayerHealth` / `playerhealthmax`; damage entry points `BulletDamage(Damage)`, `MeleeDamage`,
+  `PunchDamage`, `ExplosiveDamage`; death `DeathEvents()` / `ShowYouDied()`.
+- Base NPC `BP_NPC_Man_C` (mesh `skm_human_base_e`, AnimBP `NPC_AnimBP_C`, 91 bones), hand IK targets
+  `ik_hand_l/ik_hand_r`, crit-zone colliders, Niagara `GoreChunks`.
+- Every bullet hit goes through `EventReceiveDamageNPC(HitResult, DamageCauserStruct, DamageCauserID,
+  ExitWound, PhysHitReactPossible)`; the projectile (`BP_BT_Projectile_Base`) passes a row of
+  `BT_DamageCauser_DataTable` (e.g. `ammo_9mm_b`). This is the single entry to the gore pipeline.
+- NPCs already carry pistols in their default loadout.
+### Implemented
+- Protocol v2: poses carry a 4th transform (body: floor point + yaw); generic reliable "game events".
+- Remote player = real `BP_NPC_Man` with AI disabled (AutoPossessAI off, controller detached), placed on
+  the floor under the remote head, walking anim from movement speed, hand IK targets driven.
+- Shooting the remote body uses the game's own bullet/gore pipeline; the hit (bone, ammo type) is sent to
+  the victim, whose game calls `BulletDamage` on their real character. Victim reports `dead`/`alive`;
+  the shooter's copy ragdolls on death and is recreated on respawn.
+- Attribution filter: only bullets, and melee only when one of your hands is at the impact point
+  (ragdoll head-slams and body contact produced fake "melee_blunt" hits). Per-bone cooldowns.
+- Knock-down recovery: if hit reactions ragdoll the body while its owner lives -> `RagdollEnd`.
+- Installer bundles UE4SS (byte-identical to the working install; SHA-256 pinned; engine pinned to 4.27).
+### Verified in game (desktop mode, SimPeer as the other player)
+- Body spawns, stands on the floor, walks, shows name tag + ping.
+- SimPeer "hit 40 spine_02 ammo_9mm_b" -> local player damaged, died, `dead` then `alive` sent back.
+- Game-style bullet into the remote body -> game gore (blood, chunks) + hit forwarded exactly once.
+### Not verified
+- Arm IK following real controllers (no headset); costume differs per side (random NPC outfit).

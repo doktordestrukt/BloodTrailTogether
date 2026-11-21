@@ -64,6 +64,7 @@ class NetEngine {
   void report_sound(const std::string& asset, Vec3 pos, float vol, float pitch);
   void send_notice(const std::string& text);
   void send_world(const std::string& key, const std::string& value);
+  void send_game(const std::string& line);  // reliable, opaque to the engine
 
   // Engine -> game
   bool remote_pose(PoseFrame& out);

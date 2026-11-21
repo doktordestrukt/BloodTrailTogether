@@ -127,7 +127,12 @@ local function dist2(ax, ay, az, bx, by, bz)
 end
 
 ------------------------------------------------------------------------------- game access helpers
-local function valid(o) return o ~= nil and o.IsValid ~= nil and o:IsValid() end
+local function valid(o)
+    local t = type(o)
+    if t ~= "userdata" and t ~= "table" then return false end
+    local ok, v = pcall(function() return o:IsValid() end)
+    return ok and v == true
+end
 
 local function objPath(o)
     -- "SoundCue /Game/Audio/x/Cue.Cue" -> "/Game/Audio/x/Cue.Cue"
@@ -213,8 +218,20 @@ local function readLocalPose()
     end
     localLeft[1], localLeft[2], localLeft[3] = L[1], L[2], L[3]
     localRight[1], localRight[2], localRight[3] = R[1], R[2], R[3]
-    return string.format("P %.2f %.2f %.2f %.5f %.5f %.5f %.5f %.2f %.2f %.2f %.5f %.5f %.5f %.5f %.2f %.2f %.2f %.5f %.5f %.5f %.5f %d",
-        hx, hy, hz, qx, qy, qz, qw, L[1], L[2], L[3], L[4], L[5], L[6], L[7], R[1], R[2], R[3], R[4], R[5], R[6], R[7], flags)
+    -- Body: floor point under the head (pawn capsule bottom), facing the head's yaw.
+    local floorZ = hz - 165
+    pcall(function()
+        local pawn = UEHelpers.GetPlayer()
+        if valid(pawn) then
+            local pl = pawn:K2_GetActorLocation()
+            floorZ = pl.Z - pawn.CapsuleComponent:GetScaledCapsuleHalfHeight()
+        end
+    end)
+    local yaw = select(2, quatToRot(qx, qy, qz, qw))
+    local bqx, bqy, bqz, bqw = rotToQuat(0, yaw, 0)
+    return string.format("P %.2f %.2f %.2f %.5f %.5f %.5f %.5f %.2f %.2f %.2f %.5f %.5f %.5f %.5f %.2f %.2f %.2f %.5f %.5f %.5f %.5f %.2f %.2f %.2f %.5f %.5f %.5f %.5f %d",
+        hx, hy, hz, qx, qy, qz, qw, L[1], L[2], L[3], L[4], L[5], L[6], L[7], R[1], R[2], R[3], R[4], R[5], R[6], R[7],
+        hx, hy, floorZ, bqx, bqy, bqz, bqw, flags)
 end
 
 ------------------------------------------------------------------------------- remote avatar
@@ -309,24 +326,27 @@ local function hideAvatar()
 end
 
 local lastTagName = nil
-local function updateAvatar(v, peerName, quality, rtt)
+-- shapes=false: the full body model is shown, so only the name tag is used from this avatar.
+local function updateAvatar(v, peerName, quality, rtt, shapes)
     if avatarDisabled then return end
     if not ensureAvatar(peerName) then
         avatarDisabled = true
         return
     end
-    if avatar.hidden then
+    if avatar.hidden or avatar.shapes ~= shapes then
         for k, a in pairs(avatar) do
-            if k ~= "hidden" and valid(a) then a:SetActorHiddenInGame(false) end
+            if k ~= "hidden" and k ~= "shapes" and valid(a) then a:SetActorHiddenInGame(not shapes and k ~= "tag") end
         end
         avatar.hidden = false
+        avatar.shapes = shapes
     end
-    -- head
-    place(avatar.head, v[1], v[2], v[3], v[4], v[5], v[6], v[7])
-    local fx, fy, fz = qrot(v[4], v[5], v[6], v[7], 9, 0, 0)       -- visor 9 cm in front of the head centre
-    place(avatar.visor, v[1] + fx, v[2] + fy, v[3] + fz, v[4], v[5], v[6], v[7])
-    place(avatar.left, v[8], v[9], v[10], v[11], v[12], v[13], v[14])
-    place(avatar.right, v[15], v[16], v[17], v[18], v[19], v[20], v[21])
+    if shapes then
+        place(avatar.head, v[1], v[2], v[3], v[4], v[5], v[6], v[7])
+        local fx, fy, fz = qrot(v[4], v[5], v[6], v[7], 9, 0, 0)       -- visor 9 cm in front of the head centre
+        place(avatar.visor, v[1] + fx, v[2] + fy, v[3] + fz, v[4], v[5], v[6], v[7])
+        place(avatar.left, v[8], v[9], v[10], v[11], v[12], v[13], v[14])
+        place(avatar.right, v[15], v[16], v[17], v[18], v[19], v[20], v[21])
+    end
     -- name tag floats above the head and faces the local player
     if valid(avatar.tag) then
         local yaw = math.atan(localHead[2] - v[2], localHead[1] - v[1]) * RAD
@@ -386,6 +406,9 @@ local function captureSound(sound, x, y, z, vol, pitch)
     hookCalls = hookCalls + 1
     if playingRemote or #pendingSounds > 16 then return end
     if not valid(sound) or not nearLocalPlayer(x, y, z) then return end
+    local path = objPath(sound)
+    -- NPC sounds (footsteps, voices, gore) happen in both games already; only share the player's own.
+    if path:find("/NPC/", 1, true) or path:find("_NPC_", 1, true) or path:find("/characters/", 1, true) then return end
     soundsCaptured = soundsCaptured + 1
     pendingSounds[#pendingSounds + 1] = string.format("S %s %.1f %.1f %.1f %.3f %.3f", objPath(sound), x, y, z, vol or 1, pitch or 1)
 end
@@ -457,8 +480,270 @@ local function travelTo(mapPath)
 end
 
 ------------------------------------------------------------------------------- frame
-local handshakeDone = false
+------------------------------------------------------------------------------- remote player body + combat
+-- The other player is represented by the game's own base NPC (BP_NPC_Man) with its AI disabled.
+-- Because it is a real NPC, your guns hit it with the game's normal damage/gore pipeline. Each hit
+-- is forwarded to the other player's game, which applies it to their real character. That player's
+-- game is authoritative for their health; when they die, their body ragdolls here.
 local status = { state = "Idle" }
+local NPC_PKG = "/Game/characters/Human/Blueprints/CharacterLogic/BP_NPC_Man"
+local NPC_CLASS = NPC_PKG .. ".BP_NPC_Man_C"
+local puppet = nil           -- the remote player's body actor
+local puppetFailed = false
+local puppetDead = false
+local puppetLast = nil       -- last body position (for walk animation velocity)
+local hitHookInstalled = false
+local outbox = {}            -- "X ..." game event lines to send this frame
+local lastHitFrame = {}      -- hit cooldowns
+local puppetDownSince = nil  -- frame when the body got knocked into ragdoll while its owner lives
+local selfTest = ""
+local function sendGame(line) outbox[#outbox + 1] = "X " .. line end
+
+local function damageForHit(bone, causer)
+    bone = (bone or ""):lower()
+    local dmg = 20
+    if bone:find("head") or bone:find("neck") or bone:find("facial") or bone:find("jaw") then
+        dmg = 100
+    elseif bone:find("spine") or bone:find("pelvis") or bone:find("clavicle") or bone:find("rib") then
+        dmg = 40
+    end
+    causer = (causer or ""):lower()
+    if causer:find("melee", 1, true) then
+        return (dmg >= 100) and 25 or 10  -- punches / bats / knives: several hits needed
+    end
+    if causer:find("50bmg") or causer:find("12ga") or causer:find("308") or causer:find("44mag") or causer:find("50ae") then
+        dmg = dmg * 1.5
+    end
+    return dmg
+end
+
+-- Same call the game's projectile (BP_BT_Projectile_Base) makes when a bullet hits an NPC:
+-- EventReceiveDamageNPC(HitResult, <row of BT_DamageCauser_DataTable>, CauserID, ExitWound, PhysHitReact).
+local DAMAGE_TABLE = "/Game/BloodTrailWeapons/Data/DataTables/BT_DamageCauser_DataTable.BT_DamageCauser_DataTable"
+local causerRows = nil
+local function causerRow(id)
+    if not causerRows then
+        causerRows = {}
+        local dt = StaticFindObject(DAMAGE_TABLE)
+        if not valid(dt) then
+            pcall(LoadAsset, DAMAGE_TABLE:match("^(.-)%."))
+            dt = StaticFindObject(DAMAGE_TABLE)
+        end
+        if valid(dt) then dt:ForEachRow(function(name, row) causerRows[tostring(name)] = row end) end
+    end
+    return causerRows[id]
+end
+
+local function applyBulletHit(npc, bone, x, y, z, nx, ny, nz, causer, exitWound)
+    local row = causerRow(causer)
+    if not row then return false, "unknown damage causer " .. tostring(causer) end
+    local hit = {
+        bBlockingHit = true,
+        Location = { X = x, Y = y, Z = z }, ImpactPoint = { X = x, Y = y, Z = z },
+        Normal = { X = nx, Y = ny, Z = nz }, ImpactNormal = { X = nx, Y = ny, Z = nz },
+        TraceStart = { X = x + nx * 100, Y = y + ny * 100, Z = z + nz * 100 }, TraceEnd = { X = x - nx * 50, Y = y - ny * 50, Z = z - nz * 50 },
+        BoneName = FName(bone),
+    }
+    npc:EventReceiveDamageNPC(hit, row, FName(causer), exitWound and true or false, true)
+    return true
+end
+
+local function isPuppet(actor)
+    return valid(puppet) and valid(actor) and actor:GetFullName() == puppet:GetFullName()
+end
+
+local function installHitHook()
+    if hitHookInstalled then return end
+    hitHookInstalled = true
+    local ok, err = pcall(RegisterHook, NPC_CLASS .. ":EventReceiveDamageNPC",
+        function(ctx, HitResult, DamageCauserStruct, DamageCauserID, ExitWound)
+            local npc = ctx:get()
+            if not isPuppet(npc) or puppetDead then return end
+            local bone, causer, hx, hy, hz = "", "", nil, nil, nil
+            pcall(function()
+                local hr = p(HitResult)
+                bone = hr.BoneName:ToString()
+                hx, hy, hz = hr.ImpactPoint.X, hr.ImpactPoint.Y, hr.ImpactPoint.Z
+            end)
+            pcall(function() causer = p(DamageCauserID):ToString() end)
+            if p(ExitWound) then return end  -- the entry wound already counted
+            -- Only damage dealt by YOU counts: bullets (only players and NPC guns fire them; NPCs don't
+            -- target this body) and melee only when one of your hands is right at the impact point.
+            -- This drops blunt "hits" from the body falling, bumping walls or ragdoll head-slams.
+            if causer:find("melee", 1, true) then
+                local nearHand = hx and (dist2(hx, hy, hz, localLeft[1], localLeft[2], localLeft[3]) < 60 * 60 or
+                                         dist2(hx, hy, hz, localRight[1], localRight[2], localRight[3]) < 60 * 60)
+                if not nearHand then return end
+            elseif not causer:find("ammo", 1, true) and causer ~= "" then
+                return  -- explosions etc. are not attributed yet
+            end
+            -- Bodies touching each other register as blunt "melee" hits every physics frame:
+            -- allow at most one hit per causer+bone every 0.5 s (and blunt hits once per 1.5 s).
+            local key = causer .. "|" .. bone
+            local cooldown = causer:find("melee_blunt", 1, true) and 135 or 45
+            if lastHitFrame[key] and frameNo - lastHitFrame[key] < cooldown then return end
+            lastHitFrame[key] = frameNo
+            local dmg = damageForHit(bone, causer)
+            log(string.format("hit the other player: %s with %s -> %d damage", bone, causer, dmg))
+            sendGame(string.format("hit %d %s %s", dmg, bone ~= "" and bone or "-", causer ~= "" and causer or "-"))
+        end)
+    log((ok and "hooked " or "could not hook ") .. "EventReceiveDamageNPC" .. (ok and "" or (": " .. tostring(err))))
+end
+
+local function destroyPuppet()
+    if valid(puppet) then pcall(function() puppet:K2_DestroyActor() end) end
+    puppet, puppetLast = nil, nil
+end
+
+local function spawnPuppet(x, y, z, yaw)
+    pcall(LoadAsset, NPC_PKG)
+    local cls = StaticFindObject(NPC_CLASS)
+    local world = UEHelpers.GetWorld()
+    local gs = UEHelpers.GetGameplayStatics()
+    if not (valid(cls) and valid(world) and valid(gs)) then return nil end
+    local qx, qy, qz, qw = rotToQuat(0, yaw, 0)
+    local t = { Rotation = { X = qx, Y = qy, Z = qz, W = qw }, Translation = { X = x, Y = y, Z = z }, Scale3D = { X = 1, Y = 1, Z = 1 } }
+    local a = gs:BeginDeferredActorSpawnFromClass(world, cls, t, 1, nil)
+    if not valid(a) then return nil end
+    pcall(function() a.AutoPossessAI = 0 end)        -- EAutoPossessAI::Disabled: no brain
+    gs:FinishSpawningActor(a, t)
+    if not valid(a) then return nil end
+    pcall(function() a:DetachFromControllerPendingDestroy() end)
+    -- Stay in "walking" mode (so the animation does not play a fall) but stop the movement
+    -- component from simulating: we place the body ourselves every frame.
+    pcall(function() a.CharacterMovement:SetMovementMode(1, 0) end)
+    pcall(function() a.CharacterMovement:SetComponentTickEnabled(false) end)
+    pcall(function() a.CharacterMovement.GravityScale = 0 end)
+    pcall(function() a.CapsuleComponent:SetCollisionEnabled(0) end)  -- don't block you; the mesh still takes bullets
+    pcall(function() a.HealthOverall = 100000 end)                   -- never dies locally; the owner decides
+    pcall(function() a.DebugTextNPC:SetHiddenInGame(true, false) end)
+    pcall(function() a.DebugTextLocal:SetHiddenInGame(true, false) end)
+    installHitHook()
+    log("remote player body spawned: " .. a:GetFullName())
+    return a
+end
+
+local function half_default()
+    local h = 90
+    pcall(function() h = puppet.CapsuleComponent:GetScaledCapsuleHalfHeight() end)
+    return h
+end
+
+-- v: head(1-7) left(8-14) right(15-21) body(22-28)
+local function updatePuppet(v)
+    if puppetFailed then return false end
+    if not valid(puppet) then
+        if puppet ~= nil then log("remote player body disappeared (destroyed by the game?) - respawning") puppet = nil end
+        if puppetDead then return true end
+        local ok, a = pcall(spawnPuppet, v[22], v[23], v[24] + 90, select(2, quatToRot(v[25], v[26], v[27], v[28])))
+        if not ok or not a then
+            log("could not spawn the remote player body (" .. tostring(a) .. "), using simple shapes")
+            puppetFailed = true
+            return false
+        end
+        puppet = a
+    end
+    if puppetDead then return true end
+    -- Hit reactions can knock the body into ragdoll. Its owner is still alive, so get it back up
+    -- (the game's own get-up via RagdollEnd keeps the wounds); force it if that does not work.
+    local okS, sim = pcall(function()
+        return puppet.Mesh:IsSimulatingPhysics(FName("Pelvis")) or puppet.Mesh:IsSimulatingPhysics(FName("None"))
+    end)
+    if not okS and frameNo % 900 == 0 then log("ragdoll check failed: " .. tostring(sim)) end
+    if okS and sim then
+        puppetDownSince = puppetDownSince or frameNo
+        local down = frameNo - puppetDownSince
+        if down == 60 then
+            log("remote body knocked down - getting it back up")
+            local okE, errE = pcall(function() puppet:RagdollEnd() end)
+            if not okE then log("RagdollEnd failed: " .. tostring(errE)) end
+        end
+        if down == 240 then
+            log("remote body stayed down - resetting its physics")
+            pcall(function()
+                puppet.Mesh:SetSimulatePhysics(false)
+                puppet.Mesh:K2_AttachToComponent(puppet.CapsuleComponent, FName("None"), 2, 2, 2, true)
+                puppet.Mesh:K2_SetRelativeLocationAndRotation({ X = 0, Y = 0, Z = -half_default() }, { Pitch = 0, Yaw = -90, Roll = 0 }, false, {}, true)
+            end)
+        end
+        if down < 240 then return true end  -- leave the physics alone while it falls / gets up
+    else
+        puppetDownSince = nil
+    end
+    local half = 90
+    pcall(function() half = puppet.CapsuleComponent:GetScaledCapsuleHalfHeight() end)
+    local yaw = select(2, quatToRot(v[25], v[26], v[27], v[28]))
+    -- keep the NPC's head under the real head: the head sits ~10 cm in front of the capsule centre
+    local fx, fy = math.cos(yaw * DEG), math.sin(yaw * DEG)
+    local x, y, z = v[1] - fx * 10, v[2] - fy * 10, v[24] + half
+    puppet:K2_SetActorLocationAndRotation({ X = x, Y = y, Z = z }, { Pitch = 0, Yaw = yaw, Roll = 0 }, false, {}, true)
+    -- drive the walk/idle animation with the real movement speed
+    if puppetLast then
+        local vx, vy = (x - puppetLast[1]) * 90, (y - puppetLast[2]) * 90
+        pcall(function() puppet.CharacterMovement.Velocity = { X = vx, Y = vy, Z = 0 } end)
+    end
+    puppetLast = { x, y }
+    -- hands: the NPC rig has IK targets for both hands
+    pcall(function()
+        local lp, ly, lr = quatToRot(v[11], v[12], v[13], v[14])
+        local rp, ry, rr = quatToRot(v[18], v[19], v[20], v[21])
+        puppet.ik_hand_l:K2_SetWorldLocationAndRotation({ X = v[8], Y = v[9], Z = v[10] }, { Pitch = lp, Yaw = ly, Roll = lr }, false, {}, true)
+        puppet.ik_hand_r:K2_SetWorldLocationAndRotation({ X = v[15], Y = v[16], Z = v[17] }, { Pitch = rp, Yaw = ry, Roll = rr }, false, {}, true)
+    end)
+    return true
+end
+
+local function puppetDie()
+    if puppetDead then return end
+    puppetDead = true
+    if valid(puppet) then
+        log("other player died: ragdolling their body")
+        local ok = pcall(function() puppet:RagdollStart() end)
+        if not ok then pcall(function() puppet.Mesh:SetSimulatePhysics(true) end) end
+    end
+end
+
+local function puppetRespawn()
+    puppetDead = false
+    destroyPuppet()
+end
+
+-- my own life, reported to the other player
+local myDeadReported = false
+local function watchMyHealth()
+    local pawn = UEHelpers.GetPlayer()
+    if not valid(pawn) then return end
+    local okH, hp = pcall(function() return pawn.PlayerHealth end)
+    if not okH or type(hp) ~= "number" then return end
+    if hp <= 0 and not myDeadReported then
+        myDeadReported = true
+        sendGame("dead")
+    elseif hp > 0 and myDeadReported then
+        myDeadReported = false
+        sendGame("alive")
+    end
+end
+
+local function handleGame(line)
+    local kind, rest = line:match("^(%S+)%s*(.*)$")
+    if kind == "hit" then
+        local dmg, bone, causer = rest:match("^(%S+) (%S+) (%S+)")
+        dmg = tonumber(dmg) or 0
+        local pawn = UEHelpers.GetPlayer()
+        if valid(pawn) and dmg > 0 then
+            log(string.format("shot by the other player: %s (%s), %d damage", bone or "?", causer or "?", dmg))
+            local ok, err = pcall(function() pawn:BulletDamage(dmg) end)
+            if not ok then log("applying damage failed: " .. tostring(err)) end
+        end
+    elseif kind == "dead" then
+        puppetDie()
+        showNote((status.peer or "The other player") .. " died")
+    elseif kind == "alive" then
+        puppetRespawn()
+    end
+end
+
+local handshakeDone = false
 local framePending = false
 
 local function parseReply(reply)
@@ -474,14 +759,25 @@ local function parseReply(reply)
         elseif kind == "RP" then
             if line == "RP -" then
                 hideAvatar()
+                if valid(puppet) and not puppetDead then destroyPuppet() end
             else
                 local v = {}
                 for num in line:sub(4):gmatch("%S+") do v[#v + 1] = tonumber(num) end
-                if #v >= 21 then
-                    local ok, err = pcall(updateAvatar, v, status.peer or "Player", status.quality or 0, math.floor(status.rtt or 0))
+                if #v >= 28 then
+                    local okP, body = pcall(updatePuppet, v)
+                    if not okP then
+                        log("body update failed: " .. tostring(body) .. " - falling back to simple shapes")
+                        puppetFailed = true
+                        destroyPuppet()
+                        body = false
+                    end
+                    local ok, err = pcall(updateAvatar, v, status.peer or "Player", status.quality or 0, math.floor(status.rtt or 0), not body)
                     if not ok then log("avatar update failed: " .. tostring(err)) avatarDisabled = true end
                 end
             end
+        elseif kind == "GX" then
+            local ok, err = pcall(handleGame, line:sub(4))
+            if not ok then log("game event failed: " .. tostring(err)) end
         elseif kind == "SN" then
             local path, x, y, z, vol, pitch = line:match("^SN (%S+) (%S+) (%S+) (%S+) (%S+) (%S+)")
             if path then playRemoteSound(path, tonumber(x), tonumber(y), tonumber(z), tonumber(vol), tonumber(pitch)) end
@@ -490,8 +786,9 @@ local function parseReply(reply)
         elseif kind == "NT" then
             showNote(line:sub(4))
         elseif kind == "CF" then
-            local radius = line:match("^CFG (%S+)")
+            local radius, _, st = line:match("^CFG (%S+) (%S+) ?(%S*)")
             if radius then shareRadius2 = tonumber(radius) ^ 2 end
+            if st and st ~= "" and st ~= "-" then selfTest = st log("developer self-test: " .. st) end
         end
     end
 end
@@ -528,6 +825,7 @@ local function frame()
             avatarDisabled = false   -- try again on the new map
             destroyAvatar()
             note = nil
+            puppet, puppetLast, puppetDead, puppetFailed = nil, nil, false, false  -- old body died with the old map
         end
         if currentMap then req[#req + 1] = "M " .. currentMap end
     end
@@ -537,6 +835,21 @@ local function frame()
     end
     for i = 1, #pendingSounds do req[#req + 1] = pendingSounds[i] end
     pendingSounds = {}
+    pcall(watchMyHealth)
+    -- developer self-test: shoot the other player's body with a point-damage event
+    if selfTest == "hit" and valid(puppet) and frameNo % 600 == 0 then
+        local okT, errT = pcall(function()
+            -- a 9mm round into the chest, coming from the local player's direction
+            local hl = puppet.Mesh:GetSocketLocation(FName("spine_03"))
+            local dx, dy = localHead[1] - hl.X, localHead[2] - hl.Y
+            local len = math.max(1, math.sqrt(dx * dx + dy * dy))
+            local ok, why = applyBulletHit(puppet, "spine_03", hl.X, hl.Y, hl.Z, dx / len, dy / len, 0, "ammo_9mm_b", false)
+            log("self-test: bullet into the remote body: " .. tostring(ok) .. " " .. tostring(why or ""))
+        end)
+        if not okT then log("self-test failed: " .. tostring(errT)) end
+    end
+    for i = 1, #outbox do req[#req + 1] = outbox[i] end
+    outbox = {}
 
     local reply = exchange(table.concat(req, "\n") .. "\n")
     if reply then

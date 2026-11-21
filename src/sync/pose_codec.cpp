@@ -61,7 +61,7 @@ static Vec3 read_pos(Reader& r) {
 
 void write_pose(Writer& w, const PoseFrame& f) {
   w.u8(f.flags);
-  for (const Xform* x : {&f.head, &f.left, &f.right}) {
+  for (const Xform* x : {&f.head, &f.left, &f.right, &f.body}) {
     write_pos(w, x->p);
     write_quat32(w, x->q);
   }
@@ -70,7 +70,7 @@ void write_pose(Writer& w, const PoseFrame& f) {
 PoseFrame read_pose(Reader& r) {
   PoseFrame f;
   f.flags = r.u8();
-  for (Xform* x : {&f.head, &f.left, &f.right}) {
+  for (Xform* x : {&f.head, &f.left, &f.right, &f.body}) {
     x->p = read_pos(r);
     x->q = read_quat32(r);
   }

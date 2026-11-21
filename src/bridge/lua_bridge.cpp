@@ -2,7 +2,8 @@
 //
 // Request lines (Lua -> DLL):
 //   H <lua-mod-version>                         handshake (first frame after connecting)
-//   P hx hy hz hqx hqy hqz hqw  lx .. lqw  rx .. rqw  flags    local VR pose, world space (cm)
+//   P head(7) left(7) right(7) body(7) flags    local VR pose + body root, world space (cm)
+//   X <game event line>                         reliable game event for the other player's script
 //   M <map package path>                        current map, e.g. /Game/Maps/Sandbox/Map_Sandbox
 //   S <asset path> x y z volume pitch           a player-originated sound to share
 //   K <action>                                  hotkey: toggle_window | sim | disconnect
@@ -11,7 +12,8 @@
 // Reply lines (DLL -> Lua):
 //   CFG <shareRadiusCm> <devMode 0/1>           (only in reply to H)
 //   ST <state> <role> <quality 0-3> <rttMs> <lossPct> <simulated 0/1> <code|-> <peerName|->
-//   RP - | RP hx hy hz hqx hqy hqz hqw lx .. lqw rx .. rqw flags     remote pose (interpolated)
+//   RP - | RP head(7) left(7) right(7) body(7) flags     remote pose (interpolated)
+//   GX <game event line>                        game event from the other player's script
 //   TR <map package path>                       travel there (client follows host)
 //   SN <asset path> x y z volume pitch          play this sound at that location
 //   NT <text>                                   show a short notification in VR
@@ -61,19 +63,21 @@ std::string lua_handle_request(const std::string& req) {
       case 'H': {
         a.lua_version = rest;
         BTT_INFO("bridge: Lua mod %s handshake", rest.c_str());
-        char b[96];
-        snprintf(b, sizeof(b), "CFG %.1f %d\n", a.settings.share_sound_radius_cm, a.settings.dev_mode ? 1 : 0);
+        char b[160];
+        std::string self_test = a.settings.dev_mode ? token_safe(a.config.get("Dev.SelfTest", "-")) : "-";
+        snprintf(b, sizeof(b), "CFG %.1f %d %s\n", a.settings.share_sound_radius_cm, a.settings.dev_mode ? 1 : 0,
+                 self_test.c_str());
         out += b;
         break;
       }
       case 'P': {
-        float v[22];
-        if (!parse_floats(in, v, 21)) break;
+        float v[28];
+        if (!parse_floats(in, v, 28)) break;
         int flags = 0;
         in >> flags;
         PoseFrame f;
-        Xform* xs[3] = {&f.head, &f.left, &f.right};
-        for (int i = 0; i < 3; ++i) {
+        Xform* xs[4] = {&f.head, &f.left, &f.right, &f.body};
+        for (int i = 0; i < 4; ++i) {
           float* p = v + i * 7;
           xs[i]->p = {p[0], p[1], p[2]};
           xs[i]->q = qnormalize({p[3], p[4], p[5], p[6]});
@@ -109,6 +113,9 @@ std::string lua_handle_request(const std::string& req) {
         eng->send_world(key, value);
         break;
       }
+      case 'X':
+        if (!rest.empty()) eng->send_game(rest);
+        break;
       case 'D':
         BTT_INFO("lua: %s", rest.c_str());
         break;
@@ -131,6 +138,7 @@ std::string lua_handle_request(const std::string& req) {
     put_xform(out, rp.head);
     put_xform(out, rp.left);
     put_xform(out, rp.right);
+    put_xform(out, rp.body);
     out += " " + std::to_string(rp.flags) + "\n";
   } else {
     out += "RP -\n";
@@ -155,6 +163,7 @@ std::string lua_handle_request(const std::string& req) {
         break;
       case GameCommand::Ui:
         if (c.a.rfind("world ", 0) == 0) out += "WS " + c.a.substr(6) + "\n";
+        else if (c.a.rfind("game ", 0) == 0) out += "GX " + c.a.substr(5) + "\n";
         break;
     }
   }
