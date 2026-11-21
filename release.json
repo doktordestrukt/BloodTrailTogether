@@ -1,0 +1,13 @@
+{
+  "version": "0.1.0",
+  "unity_project_id": "",
+  "unity_environment": "production",
+  "github_repo": "",
+  "supported_builds": ["18598125"],
+  "ue4ss": {
+    "name": "UE4SS v3.0.1-1181-g83330635 (experimental)",
+    "zip": "third_party/ue4ss/UE4SS_v3.0.1-1181-g83330635.zip",
+    "url": "https://github.com/UE4SS-RE/RE-UE4SS/releases/download/experimental/UE4SS_v3.0.1-1181-g83330635.zip",
+    "sha256": ""
+  }
+}

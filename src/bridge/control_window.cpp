@@ -241,8 +241,9 @@ DWORD WINAPI ui_thread(LPVOID) {
   add(w, L"BUTTON", L"JOIN SESSION", BS_PUSHBUTTON, 300, 226, 190, 32, ID_JOIN);
 
   add(w, L"BUTTON", L"DISCONNECT", BS_PUSHBUTTON, 16, 274, 180, 32, ID_DISCONNECT);
-  HWND share = add(w, L"BUTTON", L"Share my gun / hand sounds", BS_AUTOCHECKBOX, 210, 278, 280, 24, ID_SHARE);
+  HWND share = add(w, L"BUTTON", L"", BS_AUTOCHECKBOX, 210, 281, 18, 18, ID_SHARE);
   SendMessageW(share, BM_SETCHECK, BST_CHECKED, 0);
+  add(w, L"STATIC", L"Share my gun / hand sounds", SS_LEFT, 232, 280, 260, 22, 0);
 
   add(w, L"STATIC", L"No second player around? Test with a simulated one:", SS_LEFT, 16, 324, 480, 20, 0);
   add(w, L"BUTTON", L"Simulated player: mirror", BS_PUSHBUTTON, 16, 348, 230, 30, ID_SIM_MIRROR);

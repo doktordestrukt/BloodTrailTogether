@@ -13,7 +13,9 @@
 #include <string>
 #include <thread>
 
+#include "core/config.h"
 #include "core/log.h"
+#include "engine/net_engine.h"
 #include "core/util.h"
 #include "net/bytes.h"
 #include "net/impairment.h"
@@ -446,6 +448,49 @@ static void test_relay_transport_mock() {
   mock.stop();
 }
 
+
+// ---------------------------------------------------------------- engine + simulated player (real threads/clock)
+static void test_engine_simulated_player() {
+  section("engine with simulated player (6 s real time)");
+  Settings s;
+  s.player_name = "Tester";
+  NetEngine eng(s);
+  eng.start();
+  eng.start_simulated_peer(SimMode::Mirror);
+  double t0 = now_sec();
+  int per_sec[7] = {};
+  int sounds = 0;
+  bool sent = false;
+  while (now_sec() - t0 < 6.0) {
+    double t = now_sec() - t0;
+    PoseFrame f;
+    f.flags = 3;
+    f.head.p = {(float)(t * 50), 0, 170};
+    f.left.p = {(float)(t * 50 + 30), -25, 130};
+    f.right.p = {(float)(t * 50 + 30), 25, 130};
+    eng.set_local_pose(f);
+    eng.set_local_map("/Game/Maps/Sandbox/Map_Sandbox");
+    if (!sent && t > 2.0) {
+      eng.report_sound("/Game/Test.Test", {1, 2, 3}, 1, 1);
+      sent = true;
+    }
+    PoseFrame r;
+    if (eng.remote_pose(r)) per_sec[(int)t]++;
+    std::vector<GameCommand> cmds;
+    eng.pop_commands(cmds);
+    for (auto& c : cmds)
+      if (c.kind == GameCommand::Sound) ++sounds;
+    Sleep(11);
+  }
+  auto snap = eng.snapshot();
+  printf("  remote pose frames per second: %d %d %d %d %d %d, sounds echoed %d, state %s\n", per_sec[0], per_sec[1],
+         per_sec[2], per_sec[3], per_sec[4], per_sec[5], sounds, snap.state.c_str());
+  for (int i = 1; i < 6; ++i) CHECK(per_sec[i] > 50);
+  CHECK(sounds == 1);
+  CHECK(snap.state == "Connected" && snap.same_map);
+  eng.stop();
+}
+
 int main() {
   log_init(L"", getenv("BTT_TEST_LOG") != nullptr, LogLevel::Debug);
   net_startup();
@@ -460,6 +505,7 @@ int main() {
   test_session("250ms +-50ms, 25% loss", {250, 50, 25.0, 0.0});
   test_session_timeout();
   test_relay_transport_mock();
+  test_engine_simulated_player();
   net_cleanup();
   printf("\n%d passed, %d failed\n", g_pass, g_fail);
   return g_fail ? 1 : 0;

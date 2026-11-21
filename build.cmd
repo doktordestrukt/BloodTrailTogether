@@ -22,6 +22,6 @@ if /i "%1"=="release" (
   set BUILD_DIR=%BTT_BUILD_ROOT%\release
   set REL=ON
 )
-%CMAKE% -S "%ROOT%." -B "%BUILD_DIR%" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBTT_RELEASE_BUILD=%REL% || exit /b 1
+%CMAKE% -S "%ROOT%." -B "%BUILD_DIR%" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBTT_RELEASE_BUILD=%REL% "-DBTT_PAYLOAD=%BTT_PAYLOAD%" || exit /b 1
 %CMAKE% --build "%BUILD_DIR%" %2 %3 || exit /b 1
 echo Build OK: %BUILD_DIR%

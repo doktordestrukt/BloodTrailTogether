@@ -55,6 +55,23 @@ target_link_libraries(btt_simpeer PRIVATE btt_lib)
 add_executable(btt_tests tests/test_main.cpp)
 target_link_libraries(btt_tests PRIVATE btt_lib)
 
+# Installer (GUI + CLI). The payload (mod files, optionally UE4SS) is embedded as RCDATA 101.
+set(BTT_PAYLOAD "" CACHE FILEPATH "payload.bin produced by tools/make_release.py")
+set(INSTALLER_RC ${CMAKE_BINARY_DIR}/installer.rc)
+file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}/installer/installer.manifest" _manifest)
+set(_rc "1 24 \"${_manifest}\"\n")
+if(BTT_PAYLOAD)
+  file(TO_CMAKE_PATH "${BTT_PAYLOAD}" _payload)
+  string(APPEND _rc "101 RCDATA \"${_payload}\"\n")
+endif()
+file(WRITE ${INSTALLER_RC} "${_rc}")
+add_executable(btt_installer WIN32 installer/installer_main.cpp installer/install_core.cpp ${INSTALLER_RC})
+target_link_libraries(btt_installer PRIVATE comctl32 shell32 ole32 version advapi32 user32 gdi32)
+target_link_options(btt_installer PRIVATE /MANIFEST:NO)
+if(BTT_PAYLOAD)
+  set_source_files_properties(${INSTALLER_RC} PROPERTIES OBJECT_DEPENDS "${BTT_PAYLOAD}")
+endif()
+
 # Pipe client that emulates the Lua side, for testing the DLL bridge without the game.
 add_executable(btt_bridge_probe tools/bridge_probe/main.cpp)
 target_link_libraries(btt_bridge_probe PRIVATE btt_lib)

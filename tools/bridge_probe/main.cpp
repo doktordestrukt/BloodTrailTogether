@@ -64,6 +64,7 @@ int main(int argc, char** argv) {
   QueryPerformanceCounter(&t0);
   double worst_us = 0, total_us = 0;
   int frames = 0, remote_frames = 0, sounds_back = 0;
+  int per_sec[60] = {};
   bool sound_sent = false;
   std::string last_rp, last_st;
   DWORD start = GetTickCount();
@@ -91,9 +92,12 @@ int main(int argc, char** argv) {
       return 1;
     }
     size_t p = r.find("RP ");
-    if (p != std::string::npos && r.compare(p, 4, "RP -") != 0) {
+    // "RP -" alone means no remote pose; "RP -12.3 ..." is a pose with a negative X.
+    if (p != std::string::npos && r.compare(p, 5, "RP -\n") != 0) {
       ++remote_frames;
       last_rp = r.substr(p, r.find('\n', p) - p);
+      int sec = (int)t;
+      if (sec < 60) per_sec[sec]++;
     }
     size_t s = r.find("ST ");
     if (s != std::string::npos) last_st = r.substr(s, r.find('\n', s) - s);
@@ -105,6 +109,9 @@ int main(int argc, char** argv) {
     if (nt != std::string::npos) printf("notification: %s\n", r.substr(nt + 3, r.find('\n', nt) - nt - 3).c_str());
     Sleep(11);  // ~90 Hz like a VR frame
   }
+  printf("remote pose frames per second:");
+  for (int i = 0; i < (int)seconds && i < 60; ++i) printf(" %d", per_sec[i]);
+  printf("\n");
   printf("last status : %s\n", last_st.c_str());
   printf("last remote : %s\n", last_rp.c_str());
   printf("frames %d, frames with remote pose %d, round trip avg %.0f us, worst %.0f us\n", frames, remote_frames,
