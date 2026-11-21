@@ -4,6 +4,15 @@ Versioning: [Semantic Versioning](https://semver.org). The version lives in `CMa
 `release.json` and `Scripts/main.lua` (the release script refuses to build if they differ).
 The network protocol version (`kProtocolVersion`) changes only when old and new clients can no longer talk.
 
+## [0.6.0] - 2026-11-21
+### Fixed
+- Host crash with live AI NPCs (0.3.0-0.5.1): the pose-copy body is not used on the host while AI NPCs are present (game animation + look-at instead); pose mesh moved to its own holder actor.
+- NPC fire detection by ammo polling instead of hooking Fire_pistol (hook crashed inside UE4SS).
+### Added
+- AI: hearing reports for the other player's sounds, ammo scavenging from bodies, flee/surrender when losing; also in single player.
+- NPC subtitles (category captions, shadowed text, animated), NPC voice lines replayed for the joining player; watch toggle.
+- Animated in-headset notes.
+
 ## [0.5.1] - 2026-11-21
 ### Fixed
 - Untracked hands hang at the sides (IK to a relaxed target) instead of the NPC's clasped pose.

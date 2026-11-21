@@ -7,7 +7,7 @@
 -- Everything that touches the game is wrapped in pcall: a failure disables that feature and is
 -- logged to UE4SS.log / BloodTrailTogether.log instead of crashing the game.
 
-local VERSION = "0.5.1"
+local VERSION = "0.6.0"
 local TAG = "[BloodTrailTogether] "
 local UEHelpers = require("UEHelpers")
 
@@ -647,10 +647,17 @@ local function updateNote()
         note:SetActorHiddenInGame(true)
         return
     end
-    local fx, fy, fz = qrot(headQuat[1], headQuat[2], headQuat[3], headQuat[4], 70, 0, -12)
+    -- animated: pops in while rising into place, shrinks away at the end
+    local age, left = frameNo - (noteUntil - 360), noteUntil - frameNo
+    local sc, rise = 1, 0
+    if age < 14 then local t = age / 14 sc, rise = t * (1 + 0.25 * (1 - t)), (1 - t) * -4
+    elseif left < 12 then sc = left / 12 end
+    sc = math.max(0.01, sc)
+    local fx, fy, fz = qrot(headQuat[1], headQuat[2], headQuat[3], headQuat[4], 70, 0, -12 + rise)
     local p, y, _ = quatToRot(headQuat[1], headQuat[2], headQuat[3], headQuat[4])
     note:K2_SetActorLocationAndRotation({ X = localHead[1] + fx, Y = localHead[2] + fy, Z = localHead[3] + fz },
         { Pitch = 0, Yaw = y + 180, Roll = 0 }, false, {}, true)
+    note:SetActorScale3D({ X = sc, Y = sc, Z = sc })
 end
 
 ------------------------------------------------------------------------------- shared sounds
@@ -741,6 +748,10 @@ local function playRemoteSound(path, x, y, z, vol, pitch)
         gs:PlaySoundAtLocation(world, snd, { X = x, Y = y, Z = z }, { Pitch = 0, Yaw = 0, Roll = 0 }, vol, pitch, 0, att, nil, nil)
     end)
     playingRemote = false
+    if ok and EX.reportNoise then   -- NPCs on the host hear the other player
+        local fire = path:lower():find("fire", 1, true) and not path:lower():find("dryfire", 1, true)
+        pcall(EX.reportNoise, x, y, z, fire and 1.0 or 0.35)
+    end
     if ok and path:lower():find("fire", 1, true) and not path:lower():find("dryfire", 1, true) and EX.muzzleFlash then
         pcall(EX.muzzleFlash, path, x, y, z)       -- a gunshot from the other player (or an NPC at me)
     end
@@ -893,11 +904,22 @@ end
 local pup = nil   -- cached components of the remote body (property lookups are slow; do them once)
 
 local function destroyPuppet()
+    if pup and valid(pup.holder) then pcall(function() pup.holder:K2_DestroyActor() end) end
     if valid(puppet) then pcall(function() puppet:K2_DestroyActor() end) end
     puppet, puppetLast, pup = nil, nil, nil
 end
 
-local function spawnPuppet(x, y, z, yaw)
+-- brain off, senses off, no focus: the controller only carries the look rotation we give it
+function EX.silenceController(c, yaw)
+    pcall(function() c.BrainComponent:StopLogic("BloodTrail Together") end)
+    pcall(function() c.AIPerception:Deactivate() end)
+    pcall(function() c.AIPerception:SetComponentTickEnabled(false) end)
+    pcall(function() c:K2_ClearFocus() end)
+    pcall(function() c.bSetControlRotationFromPawnOrientation = false end)
+    if yaw then pcall(function() c:SetControlRotation({ Pitch = 0, Yaw = yaw, Roll = 0 }) end) end
+end
+
+local function spawnPuppet(x, y, z, yaw, asPlayer)
     pcall(LoadAsset, NPC_PKG)
     local cls = StaticFindObject(NPC_CLASS)
     local world = getWorld()
@@ -907,10 +929,13 @@ local function spawnPuppet(x, y, z, yaw)
     local t = { Rotation = { X = qx, Y = qy, Z = qz, W = qw }, Translation = { X = x, Y = y, Z = z }, Scale3D = { X = 1, Y = 1, Z = 1 } }
     local a = gs:BeginDeferredActorSpawnFromClass(world, cls, t, 1, nil)
     if not valid(a) then return nil end
-    pcall(function() a.AutoPossessAI = 0 end)        -- EAutoPossessAI::Disabled: no brain
+    -- The other player's body gets the game's own NPC controller (BP_AIC) with its brain and senses
+    -- switched off right away. With live AI NPCs around, a body without the game's controller
+    -- crashed the game on the host (the game's AI treats every NPC body as one of its own).
+    pcall(function() a.AutoPossessAI = asPlayer and 3 or 0 end)
     gs:FinishSpawningActor(a, t)
     if not valid(a) then return nil end
-    pcall(function() a:DetachFromControllerPendingDestroy() end)
+    if not asPlayer then pcall(function() a:DetachFromControllerPendingDestroy() end) end
     -- Stay in "walking" mode (no fall animation) but don't let the movement component simulate.
     pcall(function() a.CharacterMovement:SetMovementMode(1, 0) end)
     pcall(function() a.CharacterMovement:SetComponentTickEnabled(false) end)
@@ -926,10 +951,19 @@ local function spawnPuppet(x, y, z, yaw)
     -- body without one "looks" at yaw 0 forever, so the animation kept playing turn-on-the-spot
     -- steps against the yaw we set: crossed, spinning legs (v0.3 test). Each body gets a bare
     -- AIController - no behaviour tree, no perception - that only carries the look rotation.
+    if asPlayer then
+        local c = nil
+        pcall(function() c = a.Controller end)
+        if valid(c) then
+            EX.silenceController(c, yaw)
+            return a, c
+        end
+    end
     local okC, ctrl = pcall(function()
         local c = spawnActor("/Script/AIModule.AIController")
         if not c then return nil end
         c:Possess(a)
+        pcall(function() c.bSetControlRotationFromPawnOrientation = false end)
         c:SetControlRotation({ Pitch = 0, Yaw = yaw, Roll = 0 })
         return c
     end)
@@ -954,8 +988,8 @@ end
 -- walking, crouch) every frame; we then override head and arms. The animated NPC mesh stays as the
 -- invisible hit/gore body (collision + wound painting); its gore materials are shared with the copy.
 local BODY_PARTS = { "Costume", "hair", "Eyes", "Mouth" }
-local function setupBody(a)
-    local P = { actor = a, mesh = a.Mesh, cap = a.CapsuleComponent, cm = a.CharacterMovement }
+local function setupBody(a, noIK)
+    local P = { actor = a, mesh = a.Mesh, cap = a.CapsuleComponent, cm = a.CharacterMovement, noIK = noIK }
     P.anim = P.mesh:GetAnimInstance()
     P.relLoc = P.mesh.RelativeLocation
     P.relLoc = { X = P.relLoc.X, Y = P.relLoc.Y, Z = P.relLoc.Z }
@@ -965,8 +999,14 @@ local function setupBody(a)
     -- Don't let VR hands grab or drag the other player (VRTraceChannel = GameTraceChannel1 = 14).
     pcall(function() P.mesh:SetCollisionResponseToChannel(14, 0) end)
     local ok, err = pcall(function()
+        if selfTest:find("nopose", 1, true) or P.noIK then error("not used while AI NPCs are around (host)") end
         local cls = StaticFindObject("/Script/Engine.PoseableMeshComponent")
-        local pose = a:AddComponentByClass(cls, true, { Rotation = { X = 0, Y = 0, Z = 0, W = 1 }, Translation = { X = 0, Y = 0, Z = 0 }, Scale3D = { X = 1, Y = 1, Z = 1 } }, false)
+        -- The pose copy lives on its own holder actor, NOT on the NPC: the game's NPC code walks over
+        -- its own components and crashed (host, with live AI NPCs) when it found this extra mesh.
+        local holder = spawnActor("/Script/Engine.Actor")
+        if not holder then error("could not spawn the pose holder") end
+        P.holder = holder
+        local pose = holder:AddComponentByClass(cls, false, { Rotation = { X = 0, Y = 0, Z = 0, W = 1 }, Translation = { X = 0, Y = 0, Z = 0 }, Scale3D = { X = 1, Y = 1, Z = 1 } }, false)
         if not valid(pose) then error("AddComponentByClass returned nothing") end
         pose:K2_AttachToComponent(P.mesh, FName("None"), 2, 2, 2, true)     -- snap onto the NPC mesh
         pose:SetSkeletalMesh(P.mesh.SkeletalMesh, true)
@@ -1230,19 +1270,23 @@ end
 
 -- v: head(1-7) left(8-14) right(15-21) body(22-28) heldL(29-35) heldR(36-42) flags(43)
 local function updatePuppet(v)
-    if puppetFailed then return false end
+    if puppetFailed or selfTest:find("nopuppet", 1, true) then return false end
     if not valid(puppet) then
         if puppet ~= nil then log("remote player body disappeared (destroyed by the game?) - respawning") puppet, pup = nil, nil end
         if puppetDead then return true end
         local headYaw = select(2, quatToRot(v[4], v[5], v[6], v[7]))
-        local ok, a, ctrl = pcall(spawnPuppet, v[22], v[23], v[24] + 90, headYaw)
+        local ok, a, ctrl = pcall(spawnPuppet, v[22], v[23], v[24] + 90, headYaw, true)
         if not ok or not a then
             log("could not spawn the remote player body (" .. tostring(a) .. "), using simple shapes")
             puppetFailed = true
             return false
         end
         puppet = a
-        local okB, P = pcall(setupBody, a)
+        -- KNOWN GAME CRASH (0.3-0.5.1): on the host, with live AI NPCs around, the pose-copy body
+        -- (arms/head following the controllers) crashed the game within a minute. There the body
+        -- uses the game's own animation + look-at instead; everywhere else the full IK is used.
+        local noIK = EX.hostHasAi()
+        local okB, P = pcall(setupBody, a, noIK)
         if not okB then log("body setup failed: " .. tostring(P)) destroyPuppet() puppetFailed = true return false end
         pup = P
         pup.bodyYaw = headYaw
@@ -1260,6 +1304,12 @@ local function updatePuppet(v)
     if puppetDead then return true end
     local P = pup
     local flags = math.floor(v[43] or 0)
+    -- AI NPCs appeared (or went away) on the host: rebuild the body in the matching mode
+    if frameNo % 90 == 0 and (EX.hostHasAi() and P.pose ~= nil) then
+        log("AI NPCs present on the host: switching the other player's body to the game's own animation")
+        destroyPuppet()
+        return true
+    end
 
     -- Never fall over / never be dragged while the owner is alive: any ragdoll (hit reaction,
     -- someone grabbing the body) is undone the same frame.
@@ -1281,6 +1331,7 @@ local function updatePuppet(v)
     if P.ctrl and valid(P.ctrl) then
         -- The game's own animation turns the body: when standing it steps round after the head
         -- (turn in place), when moving it faces the look direction and strafes / backpedals.
+        if frameNo % 60 == 0 then EX.silenceController(P.ctrl) end
         pcall(function() P.ctrl:SetControlRotation({ Pitch = headPitch, Yaw = headYaw, Roll = 0 }) end)
         local ry = puppet:K2_GetActorRotation().Yaw
         -- safety net: never leave the body facing far away from the head for long
@@ -1513,6 +1564,8 @@ local function hostSyncTick()
             alive[id] = true
             local dead = false
             pcall(function() dead = a.Dead == true end)
+            pcall(EX.npcBrain, id, a, dead)
+            if not dead then pcall(EX.pollNpcFire, id, a) end
             if not dead then
                 local l = a:K2_GetActorLocation()
                 local r = a:K2_GetActorRotation()
@@ -1979,14 +2032,19 @@ end
 -- that NPC, turns the NPC towards them and rolls the hit (better odds up close).
 EX.NPC_GUNSHOT = "/Game/Audio/gunfire_remix/Glock/Glock_Fire_Indoor_rmx_Cue.Glock_Fire_Indoor_rmx_Cue"
 
-function EX.installFireHook()
-    if EX.fireHooked then return end
-    EX.fireHooked = true
-    local ok, err = pcall(RegisterHook, NPC_CLASS .. ":Fire_pistol", function(ctx)
-        local okF, e = pcall(EX.onNpcFire, ctx:get())
-        if not okF then log("NPC shot handling failed: " .. tostring(e)) end
-    end)
-    log((ok and "hooked " or "could not hook ") .. "NPC Fire_pistol" .. (ok and "" or (": " .. tostring(err))))
+-- Shots are detected by the NPC's ammo counter going down (polled with the NPC sync). Hooking the
+-- NPC's Fire_pistol function crashed the game inside UE4SS when NPCs started shooting (test 0.5.2).
+EX.lastAmmo = {}
+function EX.installFireHook() end
+function EX.pollNpcFire(id, a)
+    local ammo = nil
+    pcall(function() ammo = a.Ammo end)
+    if type(ammo) ~= "number" then return end
+    local last = EX.lastAmmo[id]
+    EX.lastAmmo[id] = ammo
+    if last and ammo < last then
+        for _ = 1, math.min(3, last - ammo) do pcall(EX.onNpcFire, a) end
+    end
 end
 
 function EX.onNpcFire(npc)
@@ -2013,7 +2071,7 @@ end
 -- the game's own bullet-hole effect for that surface (decal, dust, sound). Muzzle flashes: every
 -- shared gunshot (theirs, and NPC shots aimed at you) spawns the game's muzzle flash where it fired.
 EX.cmds = {}   -- "K ..." commands for the DLL (watch menu)
-EX.settings = { tags = true, bars = true, fx = true, share = true }
+EX.settings = { tags = true, bars = true, fx = true, share = true, subs = true }
 EX.settingsVer = 1
 local PROJECTILE_CLASS = "/Game/BloodTrailWeapons/Projectiles/BP_BT_Projectile_Base.BP_BT_Projectile_Base_C"
 local BHOLE = "/Game/WeaponMaster/Decals/BP_BHole_%s.BP_BHole_%s_C"
@@ -2093,6 +2151,318 @@ function EX.muzzleFlash(path, x, y, z)
     EX.spawnAt(cls, x, y, z, pitch, yaw, 2)
 end
 
+------------------------------------------------------------------------------- smarter, more human NPCs (host)
+-- The game's own AI still drives every NPC (shooting, cover, patrols). On top of it, on the host:
+--  * hearing: the other player's gunshots and noises are reported to the AI hearing system at their
+--    position, so NPCs investigate BOTH players, not just the host
+--  * out of ammo for a while: walk to the nearest dead body and take its ammo
+--  * reading the fight: badly hurt, or friends dropping around them while a player is close ->
+--    some run for it, some give up (the game's own surrender / beg-for-life behaviour)
+EX.npcInfo = {}     -- id -> { hp0, emptySince, fled, loot }
+EX.deaths = {}      -- recent NPC deaths { x, y, z, frame }
+
+function EX.reportNoise(x, y, z, loud)
+    if status.role ~= "host" or not syncActive() then return end
+    if selfTest:find("nonoise", 1, true) then return end
+    pcall(function()
+        local sense = EX.hearing
+        if not valid(sense) then
+            sense = StaticFindObject("/Script/AIModule.Default__AISense_Hearing")
+            EX.hearing = sense
+        end
+        local inst = valid(puppet) and puppet or nil
+        if selfTest ~= "" then log(string.format("trace: noise %.0f at (%.0f, %.0f)", loud, x, y)) end
+        sense:ReportNoiseEvent(getWorld(), { X = x, Y = y, Z = z }, loud, inst, 0, FName("None"))
+    end)
+end
+
+function EX.moveTo(npc, x, y, z)
+    local ok = pcall(function()
+        local helper = EX.aiHelper
+        if not valid(helper) then
+            helper = StaticFindObject("/Script/AIModule.Default__AIBlueprintHelperLibrary")
+            EX.aiHelper = helper
+        end
+        if selfTest ~= "" then log("trace: move npc") end
+        helper:SimpleMoveToLocation(npc.Controller, { X = x, Y = y, Z = z })
+    end)
+    return ok
+end
+
+function EX.nearestPlayer(x, y, z)
+    local best, bx, by = dist2(x, y, z, localHead[1], localHead[2], localHead[3]), localHead[1], localHead[2]
+    if valid(puppet) and not puppetDead then
+        local p = puppet:K2_GetActorLocation()
+        local d = dist2(x, y, z, p.X, p.Y, p.Z + 70)
+        if d < best then best, bx, by = d, p.X, p.Y end
+    end
+    return math.sqrt(best), bx, by
+end
+
+-- called by hostSyncTick for every NPC it streams
+function EX.npcBrain(id, a, dead)
+    local info = EX.npcInfo[id]
+    if not info then
+        info = {}
+        pcall(function() info.hp0 = a.HealthOverall end)
+        EX.npcInfo[id] = info
+    end
+    local l = a:K2_GetActorLocation()
+    if dead then
+        if not info.deadSeen then
+            info.deadSeen = true
+            EX.deaths[#EX.deaths + 1] = { l.X, l.Y, l.Z, frameNo }
+            if #EX.deaths > 64 then table.remove(EX.deaths, 1) end
+        end
+        return
+    end
+    if frameNo % 27 ~= 0 then return end
+    -- 1) out of ammo for more than 4 s (the game's own reload would have refilled it): scavenge
+    local ammo, maxAmmo = nil, nil
+    pcall(function() ammo, maxAmmo = a.Ammo, a.MaxAmmo end)
+    if type(ammo) == "number" and type(maxAmmo) == "number" and maxAmmo > 0 and ammo <= 0 then
+        info.emptySince = info.emptySince or frameNo
+        if frameNo - info.emptySince > 360 then
+            if not info.loot then
+                local best, bx, by, bz = 2000 * 2000, nil, nil, nil
+                for _, d in ipairs(EX.deaths) do
+                    local dd = dist2(l.X, l.Y, l.Z, d[1], d[2], d[3])
+                    if dd < best then best, bx, by, bz = dd, d[1], d[2], d[3] end
+                end
+                if bx and EX.moveTo(a, bx, by, bz) then
+                    info.loot = { bx, by, bz }
+                    log(string.format("NPC %d is out of ammo and goes for a dead body's gun", id))
+                end
+            elseif dist2(l.X, l.Y, 0, info.loot[1], info.loot[2], 0) < 140 * 140 then
+                pcall(function() a.Ammo = maxAmmo end)
+                info.loot, info.emptySince = nil, nil
+                log(string.format("NPC %d picked up ammo", id))
+            end
+        end
+    else
+        info.emptySince, info.loot = nil, nil
+    end
+    -- 2) reading the fight: hurt badly, or two friends died nearby in the last 15 s, player close
+    if info.fled then return end
+    local hp = nil
+    pcall(function() hp = a.HealthOverall end)
+    local hurt = type(hp) == "number" and type(info.hp0) == "number" and info.hp0 > 0 and hp < info.hp0 * 0.4
+    local losses = 0
+    for _, d in ipairs(EX.deaths) do
+        if frameNo - d[4] < 1350 and dist2(l.X, l.Y, l.Z, d[1], d[2], d[3]) < 2000 * 2000 then losses = losses + 1 end
+    end
+    local pd, px, py = EX.nearestPlayer(l.X, l.Y, l.Z)
+    if (hurt or losses >= 2) and pd < 1200 then
+        info.fled = true
+        if math.random() < 0.35 then
+            pcall(function() a:EventSurrender() end)
+            log(string.format("NPC %d gives up (%s)", id, hurt and "badly hurt" or "friends down"))
+        else
+            local dx, dy = l.X - px, l.Y - py
+            local dl = math.max(1, math.sqrt(dx * dx + dy * dy))
+            EX.moveTo(a, l.X + dx / dl * 1800, l.Y + dy / dl * 1800, l.Z)
+            log(string.format("NPC %d runs for it (%s)", id, hurt and "badly hurt" or "friends down"))
+        end
+    end
+end
+
+-- true on the host when this game has live AI NPCs (cached for 1.5 s)
+function EX.hostHasAi()
+    if status.role ~= "host" then return false end
+    if EX.aiCheckAt and frameNo - EX.aiCheckAt < 135 then return EX.aiCached end
+    EX.aiCheckAt = frameNo
+    local any = false
+    pcall(function()
+        ensureNpcRegistry()
+        for _, e in ipairs(liveNpcs()) do
+            if not isPuppet(e.actor) and not mirrorIdOf[e.name] then
+                local dead = false
+                pcall(function() dead = e.actor.Dead == true end)
+                if not dead then any = true break end
+            end
+        end
+    end)
+    EX.aiCached = any
+    return any
+end
+
+-- Single player (or not connected): the same smarter AI runs on this game's own NPCs. A joining
+-- player's NPCs are AI-less copies of the host's, so nothing runs there.
+EX.soloIds, EX.nextSoloId = {}, 100000
+function EX.soloBrainTick()
+    if frameNo % 9 ~= 0 then return end
+    if syncActive() then return end            -- host: hostSyncTick runs the brain; client: no AI
+    ensureNpcRegistry()
+    for _, e in ipairs(liveNpcs()) do
+        if not isPuppet(e.actor) then
+            local id = EX.soloIds[e.name]
+            if not id then id = EX.nextSoloId EX.nextSoloId = id + 1 EX.soloIds[e.name] = id end
+            local dead = false
+            pcall(function() dead = e.actor.Dead == true end)
+            pcall(EX.npcBrain, id, e.actor, dead)
+        end
+    end
+end
+
+------------------------------------------------------------------------------- NPC voice subtitles
+-- When an NPC speaks, its line is shown above its head: white text with a black shadow copy behind
+-- it, so it reads on light and dark backgrounds alike. It pops in, holds, and shrinks away. The
+-- host also sends each line to the joining player, whose copy of that NPC speaks it too (before,
+-- the joining player heard no NPC voices at all).
+-- The game has no subtitle text for these recordings; captions come from each recording's line
+-- type (and its own words where the file name has them).
+EX.CAPTIONS = {
+    HeardSusNoise = { "Huh? What was that?", "Did you hear that?", "Something's there..." },
+    HeardDangerNoise = { "What was that?!", "That was a gunshot!", "Someone's here!" },
+    IWillInvestigate = { "I'll go check it out.", "I'm gonna go see what that was." },
+    YouGoInvestigate = { "Go check that out.", "You, go take a look." },
+    ComradeGoingToInvestigate = { "He's going to look.", "Cover him." },
+    MidSearchSolo = { "Where are you...", "I know you're here." },
+    MidSearchAccompanied = { "Keep looking!", "He's around here, I know it." },
+    PlayerSightedSolo = { "There you are!", "I see you!" },
+    PlayerSightedAccompanied = { "There he is!", "Contact! Over there!" },
+    PlayerIsNear = { "He's close...", "He's right here somewhere." },
+    LostSightOfPlayer = { "Where'd he go?", "Lost him!" },
+    BattleCrySolo = { "Come on then!", "You're dead!" },
+    BattleCryAccompanied = { "Get him!", "Take him down!" },
+    CallForHelp = { "Help! Over here!", "I need help!" },
+    ReplyCallForHelp = { "Coming!", "On my way!" },
+    ImHit = { "I'm hit!", "Argh, I'm hit!" },
+    SuccessfulHit = { "Got him!", "Hit him!" },
+    Reloading = { "Reloading!", "Cover me, reloading!" },
+    Taunt = { "Is that all you've got?", "Come out!" },
+    VictorySolo = { "Got you.", "That's it." },
+    VictoryAccompanied = { "We got him!", "He's down!" },
+    MournComradeDeath = { "No... not him...", "They got him..." },
+    ShockAtComradeDeath = { "Oh god!", "He's dead!" },
+    BegForLife = { "Please, don't shoot!", "Please... I have a family!", "Don't kill me!" },
+    Yes = { "Yes." }, No = { "No!" },
+    IdleSolo = { "[mutters]" }, IdleAccompanied = { "[chatting]" },
+    Pain = { "[groans]" }, Pain_Grunt = { "[grunts]" }, Pain_Scream = { "[screams]" },
+    Pain_Death = { "[dying]" }, Pain_Gargle = { "[gurgling]" }, Pain_AgonizedGasp = { "[gasps]" },
+    Pain_Moan = { "[moans]" }, Breath_Heavy = { "[heavy breathing]" }, Breath_FuckedUp = { "[ragged breathing]" },
+}
+EX.WORDS = { whatwasthat = "What was that?", shit = "Shit!", belch = "[belches]", choking = "[choking]",
+    longscreaming = "[screaming]", LongPainGrunt = "[long groan]", LongManMoan = "[moaning]", TeabagginTime = "Teabaggin' time!" }
+
+function EX.captionFor(soundName)
+    -- VB_GenericMaleA_<Type>_<NN>[_words]
+    soundName = soundName:gsub("_Cue$", "")
+    local rest = soundName:match("^VB_[^_]+_(.+)$")
+    if not rest then return nil end
+    local typ, num, words = rest:match("^(.-)_?%-?(%d+)_?(.*)$")
+    if not typ then typ, num, words = rest, "0", "" end
+    typ = typ:gsub("_$", ""):gsub("%-$", "")
+    words = (words or ""):gsub("_Cue$", "")
+    if words ~= "" and words ~= "alt" then
+        if EX.WORDS[words] then return EX.WORDS[words] end
+        if words:find("_") then
+            local s = words:gsub("_", " ")
+            return s:sub(1, 1):upper() .. s:sub(2) .. (s:find("^wh") and "?" or ".")
+        end
+    end
+    local list = EX.CAPTIONS[typ]
+    if not list then return nil end
+    return list[(tonumber(num) or 0) % #list + 1]
+end
+
+EX.subs = {}   -- npc full name -> { main, shadow, t0, until, actor }
+function EX.showSubtitle(npc, text)
+    if not valid(npc) or not text then return end
+    local key = npc:GetFullName()
+    if selfTest ~= "" then log("trace: subtitle '" .. text .. "'") end
+    local s = EX.subs[key]
+    if not s or not valid(s.main) then
+        s = { main = textActor("", 7, 255, 255, 255), shadow = textActor("", 7, 0, 0, 0) }
+        if not s.main or not s.shadow then return end
+        EX.subs[key] = s
+    end
+    s.main.TextRender:K2_SetText(FText(text))
+    s.shadow.TextRender:K2_SetText(FText(text))
+    s.actor, s.t0 = npc, frameNo
+    s.untilF = frameNo + math.floor(90 * (2.2 + #text * 0.05))
+    s.main:SetActorHiddenInGame(false)
+    s.shadow:SetActorHiddenInGame(false)
+end
+
+function EX.subtitleTick()
+    for key, s in pairs(EX.subs) do
+        if not valid(s.main) or not valid(s.actor) or frameNo > s.untilF + 12 then
+            if valid(s.main) then s.main:SetActorHiddenInGame(true) end
+            if valid(s.shadow) then s.shadow:SetActorHiddenInGame(true) end
+            if not valid(s.actor) then EX.subs[key] = nil end
+        elseif frameNo <= s.untilF + 12 then
+            local l = s.actor:K2_GetActorLocation()
+            pcall(function() local h = s.actor.Mesh:GetSocketLocation(FName("Head")) l = h end)
+            local z = l.Z + 32
+            local yaw = math.atan(localHead[2] - l.Y, localHead[1] - l.X) * RAD
+            -- pop in (ease-out with a small overshoot), hold, shrink away
+            local age = frameNo - s.t0
+            local sc
+            if age < 12 then local t = age / 12 sc = t * (1 + 0.25 * (1 - t))   -- pop in with a little overshoot
+            elseif frameNo > s.untilF then sc = 1 - (frameNo - s.untilF) / 12    -- shrink away
+            else sc = 1 end
+            sc = math.max(0.01, sc)
+            local fx, fy = math.cos(yaw * DEG), math.sin(yaw * DEG)
+            s.main:K2_SetActorLocationAndRotation({ X = l.X, Y = l.Y, Z = z }, { Pitch = 0, Yaw = yaw, Roll = 0 }, false, {}, true)
+            s.shadow:K2_SetActorLocationAndRotation({ X = l.X - fx * 0.6, Y = l.Y - fy * 0.6, Z = z - 0.5 }, { Pitch = 0, Yaw = yaw, Roll = 0 }, false, {}, true)
+            s.main:SetActorScale3D({ X = sc, Y = sc, Z = sc })
+            s.shadow:SetActorScale3D({ X = sc, Y = sc, Z = sc })
+        end
+    end
+end
+
+-- Watch every NPC's voice: a new recording starting = a new line (host: real NPCs; also works for
+-- NPCs in the joining player's own game, e.g. without NPC sync).
+EX.voiceSeen = {}
+function EX.voiceTick()
+    if frameNo % 6 ~= 0 then return end
+    ensureNpcRegistry()
+    for _, e in ipairs(liveNpcs()) do
+        local a = e.actor
+        if not isPuppet(a) then
+            pcall(function()
+                local vc = a.AudioComponent_Voice
+                if not valid(vc) or not vc:IsPlaying() then
+                    EX.voiceSeen[e.name] = nil
+                    return
+                end
+                local snd = vc.Sound
+                if not valid(snd) then return end
+                local path = objPath(snd)
+                if EX.voiceSeen[e.name] == path then return end
+                EX.voiceSeen[e.name] = path
+                local name = path:match("([^/%.]+)$") or path
+                local text = EX.captionFor(name)
+                if selfTest ~= "" then log("trace: voice " .. name .. " -> " .. tostring(text)) end
+                if EX.settings.subs ~= false and text then EX.showSubtitle(a, text) end
+                -- host: let the joining player's copy of this NPC say it too
+                if status.role == "host" and syncActive() then
+                    local id = npcIdOf[e.name]
+                    if id then sendGame(string.format("npcsay %d %s", id, path)) end
+                end
+            end)
+        end
+    end
+end
+
+-- joining player: the host's NPC spoke
+function EX.onNpcSay(id, path)
+    local m = npcActor[id]
+    if not valid(m) then return end
+    pcall(function()
+        local snd = findAsset(path)
+        if snd then
+            local vc = m.AudioComponent_Voice
+            vc:SetSound(snd)
+            vc:Play(0)
+        end
+    end)
+    EX.voiceSeen[m:GetFullName()] = path      -- don't caption it a second time from voiceTick
+    local text = EX.captionFor(path:match("([^/%.]+)$") or path)
+    if EX.settings.subs ~= false and text then EX.showSubtitle(m, text) end
+end
+
 ------------------------------------------------------------------------------- watch: status + hologram menu
 -- Look at your raised left hand: a status hologram (who, ping, health) appears above the watch.
 -- Tap the watch with your right hand: a holographic settings menu opens above it. Touch an entry
@@ -2137,6 +2507,7 @@ function EX.menuItems()
     end
     items[#items + 1] = { label = "NAME TAGS   " .. onOff(EX.settings.tags), act = function() EX.settings.tags = not EX.settings.tags EX.saveSettings() end }
     items[#items + 1] = { label = "HEALTH BARS   " .. onOff(EX.settings.bars), act = function() EX.settings.bars = not EX.settings.bars EX.saveSettings() end }
+    items[#items + 1] = { label = "SUBTITLES   " .. onOff(EX.settings.subs), act = function() EX.settings.subs = not EX.settings.subs EX.saveSettings() end }
     items[#items + 1] = { label = "BULLET FX   " .. onOff(EX.settings.fx), act = function() EX.settings.fx = not EX.settings.fx EX.saveSettings() end }
     items[#items + 1] = { label = "SHARE MY SOUNDS   " .. onOff(EX.settings.share), act = function()
         EX.settings.share = not EX.settings.share
@@ -2378,6 +2749,9 @@ local function handleGame(line)
         handleNpcEvent(kind, rest)
     elseif kind == "hp" then
         remoteHealth = tonumber(rest) or remoteHealth
+    elseif kind == "npcsay" then
+        local id, path = rest:match("^(%d+) (%S+)")
+        if id then EX.onNpcSay(tonumber(id), path) end
     elseif kind == "impact" then
         local x, y, z, nx, ny, nz, surf = rest:match("^(%S+) (%S+) (%S+) (%S+) (%S+) (%S+) ?(%S*)")
         if x then EX.onImpact(tonumber(x), tonumber(y), tonumber(z), tonumber(nx), tonumber(ny), tonumber(nz), surf) end
@@ -2508,6 +2882,21 @@ local function frame()
     if selfTest:find("sandbox", 1, true) and frameNo == 600 and currentMap and not currentMap:find("Map_Sandbox", 1, true) then
         travelTo("/Game/Maps/Sandbox/Map_Sandbox")
     end
+    -- developer self-test: spawn two real NPCs (with their normal AI) 6-8 m in front of me
+    if selfTest:find("spawnnpc", 1, true) and frameNo == 1200 then
+        for i = 1, 2 do
+            pcall(function()
+                pcall(LoadAsset, NPC_PKG)
+                local gs = UEHelpers.GetGameplayStatics()
+                local x, y = localHead[1] + 600 + i * 150, localHead[2] + (i - 1.5) * 300
+                local t = { Rotation = { X = 0, Y = 0, Z = 1, W = 0 }, Translation = { X = x, Y = y, Z = localHead[3] + 20 }, Scale3D = { X = 1, Y = 1, Z = 1 } }
+                local a = gs:BeginDeferredActorSpawnFromClass(getWorld(), StaticFindObject(NPC_CLASS), t, 1, nil)
+                pcall(function() a.AutoPossessAI = 3 end)   -- placed in world or spawned: gets its AI
+                gs:FinishSpawningActor(a, t)
+                log("self-test: spawned AI NPC " .. a:GetFullName())
+            end)
+        end
+    end
     -- developer self-test: shoot the first mirrored NPC (client side of NPC sync)
     if selfTest:find("npchit", 1, true) and frameNo % 450 == 0 then
         for _, m in pairs(npcActor) do
@@ -2547,6 +2936,11 @@ local function frame()
     pcall(updateNote)
     pcall(EX.wristTick)
     pcall(EX.connectionWarning)
+    if not status.simulated then
+        pcall(EX.voiceTick)
+        pcall(EX.subtitleTick)
+        pcall(EX.soloBrainTick)
+    end
 end
 
 ------------------------------------------------------------------------------- start
