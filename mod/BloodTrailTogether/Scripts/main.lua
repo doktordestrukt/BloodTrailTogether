@@ -7,7 +7,7 @@
 -- Everything that touches the game is wrapped in pcall: a failure disables that feature and is
 -- logged to UE4SS.log / BloodTrailTogether.log instead of crashing the game.
 
-local VERSION = "0.2.0"
+local VERSION = "0.2.1"
 local TAG = "[BloodTrailTogether] "
 local UEHelpers = require("UEHelpers")
 
@@ -218,14 +218,29 @@ local function readLocalPose()
     end
     localLeft[1], localLeft[2], localLeft[3] = L[1], L[2], L[3]
     localRight[1], localRight[2], localRight[3] = R[1], R[2], R[3]
-    -- Body: floor point under the head (pawn capsule bottom), facing the head's yaw.
+    -- Body: floor point under the head, facing the head's yaw. The VR pawn's actor location is
+    -- already at the floor (measured: actor Z 0.6 with floor 0); ordinary characters have it at the
+    -- capsule centre. Pick whichever gives a plausible eye height.
     local floorZ = hz - 165
     pcall(function()
         local pawn = UEHelpers.GetPlayer()
         if valid(pawn) then
-            local pl = pawn:K2_GetActorLocation()
-            floorZ = pl.Z - pawn.CapsuleComponent:GetScaledCapsuleHalfHeight()
+            local pz = pawn:K2_GetActorLocation().Z
+            local vrBase = StaticFindObject("/Script/VRExpansionPlugin.VRBaseCharacter")
+            if valid(vrBase) and pawn:IsA(vrBase) then
+                floorZ = pz                                   -- VRExpansion: actor sits on the floor
+            else
+                local half = 0                                -- plain pawns (VROrigin) have no capsule
+                pcall(function() half = pawn.CapsuleComponent:GetScaledCapsuleHalfHeight() end)
+                floorZ = pz - half
+            end
         end
+    end)
+    -- What the hands hold (so the other side shows a gun only when you really have one)
+    pcall(function()
+        local pawn = UEHelpers.GetPlayer()
+        if pawn["Left Grip Motion Controller"]:HasGrippedObjects() then flags = flags | 4 end
+        if pawn["Right Grip Motion Controller"]:HasGrippedObjects() then flags = flags | 8 end
     end)
     local yaw = select(2, quatToRot(qx, qy, qz, qw))
     local bqx, bqy, bqz, bqw = rotToQuat(0, yaw, 0)
@@ -499,39 +514,42 @@ local puppetDownSince = nil  -- frame when the body got knocked into ragdoll whi
 local selfTest = ""
 local function sendGame(line) outbox[#outbox + 1] = "X " .. line end
 
+-- Damage as a SHARE of the victim's max health (their game knows its own health scale):
+-- head = dead, chest/pelvis = half, limbs = a third. Heavy rounds hit harder.
 local function damageForHit(bone, causer)
     bone = (bone or ""):lower()
-    local dmg = 20
+    local frac = 0.34
     if bone:find("head") or bone:find("neck") or bone:find("facial") or bone:find("jaw") then
-        dmg = 100
+        frac = 1.0
     elseif bone:find("spine") or bone:find("pelvis") or bone:find("clavicle") or bone:find("rib") then
-        dmg = 40
+        frac = 0.5
     end
     causer = (causer or ""):lower()
     if causer:find("melee", 1, true) then
-        return (dmg >= 100) and 25 or 10  -- punches / bats / knives: several hits needed
+        return (frac >= 1.0) and 0.34 or 0.15  -- punches / bats / knives
     end
     if causer:find("50bmg") or causer:find("12ga") or causer:find("308") or causer:find("44mag") or causer:find("50ae") then
-        dmg = dmg * 1.5
+        frac = math.min(1.0, frac * 1.6)
     end
-    return dmg
+    return frac
 end
 
 -- Same call the game's projectile (BP_BT_Projectile_Base) makes when a bullet hits an NPC:
 -- EventReceiveDamageNPC(HitResult, <row of BT_DamageCauser_DataTable>, CauserID, ExitWound, PhysHitReact).
 local DAMAGE_TABLE = "/Game/BloodTrailWeapons/Data/DataTables/BT_DamageCauser_DataTable.BT_DamageCauser_DataTable"
-local causerRows = nil
+-- Looked up fresh every time: row pointers go stale when the game reloads the level.
 local function causerRow(id)
-    if not causerRows then
-        causerRows = {}
-        local dt = StaticFindObject(DAMAGE_TABLE)
-        if not valid(dt) then
-            pcall(LoadAsset, DAMAGE_TABLE:match("^(.-)%."))
-            dt = StaticFindObject(DAMAGE_TABLE)
-        end
-        if valid(dt) then dt:ForEachRow(function(name, row) causerRows[tostring(name)] = row end) end
+    local dt = StaticFindObject(DAMAGE_TABLE)
+    if not valid(dt) then
+        pcall(LoadAsset, DAMAGE_TABLE:match("^(.-)%."))
+        dt = StaticFindObject(DAMAGE_TABLE)
     end
-    return causerRows[id]
+    if not valid(dt) then return nil end
+    local found = nil
+    dt:ForEachRow(function(name, row)
+        if not found and tostring(name) == id then found = row end
+    end)
+    return found
 end
 
 local function applyBulletHit(npc, bone, x, y, z, nx, ny, nz, causer, exitWound)
@@ -594,8 +612,8 @@ local function installHitHook()
             if lastHitFrame[key] and frameNo - lastHitFrame[key] < cooldown then return end
             lastHitFrame[key] = frameNo
             local dmg = damageForHit(bone, causer)
-            log(string.format("hit the other player: %s with %s -> %d damage", bone, causer, dmg))
-            sendGame(string.format("hit %d %s %s", dmg, bone ~= "" and bone or "-", causer ~= "" and causer or "-"))
+            log(string.format("hit the other player: %s with %s -> %.0f%% of their health", bone, causer, dmg * 100))
+            sendGame(string.format("hit %.2f %s %s", dmg, bone ~= "" and bone or "-", causer ~= "" and causer or "-"))
         end)
     log((ok and "hooked " or "could not hook ") .. "EventReceiveDamageNPC" .. (ok and "" or (": " .. tostring(err))))
 end
@@ -693,6 +711,49 @@ local function updatePuppet(v)
         pcall(function() puppet.CharacterMovement.Velocity = { X = vx, Y = vy, Z = 0 } end)
     end
     puppetLast = { x, y }
+    -- Gun only when they hold something; relaxed stance (ALS overlay 0) otherwise.
+    local flags = math.floor(v[29] or 0)
+    local armed = (flags & 12) ~= 0
+    local anim = nil
+    pcall(function() anim = puppet.Mesh:GetAnimInstance() end)
+    if puppet.bttArmed ~= armed then
+        puppet.bttArmed = armed
+        pcall(function() puppet.StaticMesh:SetVisibility(armed, true) end)
+        pcall(function() puppet.Slidemesh:SetVisibility(false, true) end)
+        pcall(function() anim.OverlayState = armed and 7 or 0 end)
+    end
+    -- Head: look exactly where the real headset looks (turn + up/down) via the rig's look-at.
+    pcall(function()
+        local fx2, fy2, fz2 = qrot(v[4], v[5], v[6], v[7], 300, 0, 0)
+        -- "Look At Location" is an FTransform in this AnimBP
+        anim["Look At Location"] = { Translation = { X = v[1] + fx2, Y = v[2] + fy2, Z = v[3] + fz2 },
+                                     Rotation = { X = 0, Y = 0, Z = 0, W = 1 }, Scale3D = { X = 1, Y = 1, Z = 1 } }
+        anim.DragonLookAlpha = 1.0
+        -- crouch when the real head is low (ALS stance 1 = crouching)
+        anim.Stance = (v[3] - v[24] < 120) and 1 or 0
+        local hp, hyw = quatToRot(v[4], v[5], v[6], v[7])
+        anim.AimingRotation = { Pitch = hp, Yaw = hyw, Roll = 0 }
+    end)
+    if selfTest ~= "" and frameNo % 450 == 0 then
+        local okC, errC = pcall(function()
+            local parts = {}
+            local hb = puppet.Mesh:GetSocketLocation(FName("head"))
+            parts[#parts + 1] = string.format("remote head Z %.0f, body head bone Z %.0f (diff %.0f), body actor Z %.0f, floor %.0f",
+                v[3], hb.Z, hb.Z - v[3], puppet:K2_GetActorLocation().Z, v[24])
+            pcall(function() parts[#parts + 1] = "gun visible " .. tostring(puppet.StaticMesh:IsVisible()) end)
+            pcall(function() parts[#parts + 1] = "overlay " .. tostring(anim.OverlayState) end)
+            pcall(function() parts[#parts + 1] = "look alpha " .. tostring(anim.DragonLookAlpha) end)
+            local okL, la = pcall(function() local l = anim["Look At Location"].Translation return string.format("(%.0f,%.0f,%.0f)", l.X, l.Y, l.Z) end)
+            pcall(function()
+                local hd = puppet.Mesh:GetSocketLocation(FName("head"))
+                local fx3, fy3, fz3 = qrot(v[4], v[5], v[6], v[7], 300, 0, 0)
+                parts[#parts + 1] = string.format("wanted look (%.0f,%.0f,%.0f) stance %s", v[1] + fx3, v[2] + fy3, v[3] + fz3, tostring(anim.Stance))
+            end)
+            parts[#parts + 1] = "look-at " .. tostring(la)
+            log("body check: " .. table.concat(parts, ", "))
+        end)
+        if not okC then log("body check failed: " .. tostring(errC)) end
+    end
     -- hands: the NPC rig has IK targets for both hands
     pcall(function()
         local lp, ly, lr = quatToRot(v[11], v[12], v[13], v[14])
@@ -890,13 +951,26 @@ end
 local function handleGame(line)
     local kind, rest = line:match("^(%S+)%s*(.*)$")
     if kind == "hit" then
-        local dmg, bone, causer = rest:match("^(%S+) (%S+) (%S+)")
-        dmg = tonumber(dmg) or 0
+        local frac, bone, causer = rest:match("^(%S+) (%S+) (%S+)")
+        frac = tonumber(frac) or 0
         local pawn = UEHelpers.GetPlayer()
-        if valid(pawn) and dmg > 0 then
-            log(string.format("shot by the other player: %s (%s), %d damage", bone or "?", causer or "?", dmg))
+        if valid(pawn) and frac > 0 then
+            local maxHp = 100
+            pcall(function() maxHp = pawn.playerhealthmax end)
+            if type(maxHp) ~= "number" or maxHp <= 0 then maxHp = 100 end
+            local dmg = frac * maxHp
+            log(string.format("shot by the other player: %s (%s), %.0f%% of max health (%.0f)", bone or "?", causer or "?", frac * 100, dmg))
             local ok, err = pcall(function() pawn:BulletDamage(dmg) end)
             if not ok then log("applying damage failed: " .. tostring(err)) end
+            -- a killing shot must kill even if the game's damage code softens it
+            if frac >= 1.0 then
+                pcall(function()
+                    if pawn.PlayerHealth > 0 then
+                        pawn.PlayerHealth = 0
+                        pawn:BulletDamage(maxHp)
+                    end
+                end)
+            end
         end
     elseif kind == "dead" then
         puppetDie()

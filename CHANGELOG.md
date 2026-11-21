@@ -4,6 +4,14 @@ Versioning: [Semantic Versioning](https://semver.org). The version lives in `CMa
 `release.json` and `Scripts/main.lua` (the release script refuses to build if they differ).
 The network protocol version (`kProtocolVersion`) changes only when old and new clients can no longer talk.
 
+## [0.2.1] - 2026-11-21
+### Fixed (from the first real two-player session)
+- Remote body sank ~1 m: VRExpansion pawns have their actor at the floor (measured), not at capsule centre.
+- NPC pistol always visible: hidden unless the player grips something (grip flags in pose); ALS overlay 0 when unarmed.
+- PvP damage now a fraction of the victim's `playerhealthmax` (250): head 100 %, torso 50 %, limbs 34 %.
+- Head look-at via the AnimBP's DragonIK `Look At Location` (an FTransform) + crouch via ALS Stance.
+- Damage-table rows re-fetched each hit (stale after level reload).
+
 ## [0.2.0] - 2026-11-21
 ### Added
 - Remote players appear as the game's full-body human NPC (AI disabled), walking with the player.

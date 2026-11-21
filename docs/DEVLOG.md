@@ -129,3 +129,13 @@ files in `BTVR\Binaries\Win64` were byte-identical (only ReShade later rewrote i
   when the spawner made one; 4 bullet hits sent by the client were replayed on the real NPC, which died
   (dead flag streamed). Client side (earlier run): own NPCs removed, mirror spawned, client hits forwarded.
 - NPC sync is a setting: `[Gameplay] NpcSync=1` (default on).
+
+## 2026-11-21 — v0.2.1: fixes from the first real two-player session (218 ms over Relay)
+Reported: body in the floor, always holding a gun, not dying when shot, no head movement.
+- Measured in game: WendigoVrChar actor Z = 0.6 on a floor at 0 (capsule half 96) -> body sank ~96 cm.
+  Floor = actor Z for VRBaseCharacter, actor Z - half otherwise. Verified: body head bone within 3-10 cm of the headset.
+- playerhealthmax = 250 (old fixed 40 damage needed ~7 hits). Damage is now a fraction; headshot -> dead in ~70 ms.
+- NPC AnimBP is ALS: OverlayState 7 = pistol stance (now 0 unarmed), Stance (crouch), DragonIK
+  `Look At Location` is an FTransform (writing a vector failed silently); verified applied target == headset gaze.
+- Gun components: StaticMesh (SM_NPC_Piovra) + Slidemesh, hidden unless the sender grips something.
+- Launching BTVR.exe directly does not work reliably (SteamStub); Steam drops `-nohmd` from -applaunch.
