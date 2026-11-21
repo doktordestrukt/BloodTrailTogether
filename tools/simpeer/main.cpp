@@ -1,0 +1,175 @@
+// btt_simpeer: a headless second "player" for testing BloodTrail Together without another person.
+// It speaks the exact same session protocol as the game DLL over a real transport:
+//   btt_simpeer relay-host                 create a Unity Relay session, print the join code
+//   btt_simpeer relay-join <CODE>          join a Unity Relay session (e.g. one hosted in-game)
+//   btt_simpeer udp-host [port]            developer: direct UDP host on 127.0.0.1
+//   btt_simpeer udp-join <ip> [port]       developer: direct UDP client
+// Options: --name N --config path\config.ini --latency ms --jitter ms --loss pct --pattern orbit|idle|wave
+//          --seconds N (auto-exit) --log path
+// It sends scripted VR tracking (head + both hands), answers sounds with an echo, follows maps,
+// and prints connection statistics once per second.
+#include <windows.h>
+
+#include <cmath>
+#include <cstdio>
+#include <string>
+
+#include "core/config.h"
+#include "core/log.h"
+#include "core/util.h"
+#include "net/impairment.h"
+#include "net/session.h"
+#include "net/udp_transport.h"
+#include "relay/relay_transport.h"
+
+using namespace btt;
+
+static volatile bool g_run = true;
+static BOOL WINAPI on_ctrl(DWORD) {
+  g_run = false;
+  return TRUE;
+}
+
+static PoseFrame scripted_pose(const std::string& pattern, double t) {
+  PoseFrame f{};
+  f.flags = 3;
+  float ang = pattern == "orbit" ? (float)(t * 0.5) : 0.0f;
+  float r = pattern == "orbit" ? 150.0f : 0.0f;
+  Vec3 head = {std::cos(ang) * r, std::sin(ang) * r, 165.0f + 3.0f * (float)std::sin(t * 1.3)};
+  float face = ang + 1.5708f;
+  Quat q = {0, 0, std::sin(face / 2), std::cos(face / 2)};
+  f.head = {head, q};
+  float wave = pattern == "idle" ? 0.0f : 25.0f * (float)std::sin(t * 4.0);
+  auto hand = [&](float side, float up) {
+    float fx = std::cos(face), fy = std::sin(face);
+    float rx = -fy, ry = fx;
+    return Xform{{head.x + fx * 35 + rx * side * 25, head.y + fy * 35 + ry * side * 25, head.z - 40 + up}, q};
+  };
+  f.left = hand(-1, 0);
+  f.right = hand(1, wave);
+  return f;
+}
+
+int main(int argc, char** argv) {
+  if (argc < 2) {
+    printf("usage: btt_simpeer relay-host | relay-join CODE | udp-host [port] | udp-join IP [port]\n"
+           "       [--name N] [--config file] [--latency ms] [--jitter ms] [--loss pct]\n"
+           "       [--pattern orbit|idle|wave] [--seconds N] [--log file]\n");
+    return 2;
+  }
+  std::string mode = argv[1], arg1, arg2;
+  std::string name = "SimPeer", cfg_path, pattern = "orbit", log_path;
+  ImpairmentParams imp;
+  double seconds = 0;
+  for (int i = 2; i < argc; ++i) {
+    std::string a = argv[i];
+    auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
+    if (a == "--name") name = next();
+    else if (a == "--config") cfg_path = next();
+    else if (a == "--latency") imp.latency_ms = atoi(next().c_str());
+    else if (a == "--jitter") imp.jitter_ms = atoi(next().c_str());
+    else if (a == "--loss") imp.loss_pct = atof(next().c_str());
+    else if (a == "--pattern") pattern = next();
+    else if (a == "--seconds") seconds = atof(next().c_str());
+    else if (a == "--log") log_path = next();
+    else if (arg1.empty()) arg1 = a;
+    else arg2 = a;
+  }
+  log_init(to_wide(log_path), true, LogLevel::Info);
+  SetConsoleCtrlHandler(on_ctrl, TRUE);
+  net_startup();
+
+  Config cfg;
+  if (!cfg_path.empty() && !cfg.load(to_wide(cfg_path))) BTT_WARN("could not read %s", cfg_path.c_str());
+  Settings s = Settings::from(cfg);
+  RelayConfig rc{s.unity_project_id, s.unity_environment, s.relay_region};
+
+  TransportPtr t;
+  Role role = Role::Host;
+  if (mode == "relay-host") t = RelayTransport::host(rc);
+  else if (mode == "relay-join") { t = RelayTransport::join(rc, arg1); role = Role::Client; }
+  else if (mode == "udp-host") t = UdpTransport::host((uint16_t)(arg1.empty() ? 27777 : atoi(arg1.c_str())));
+  else if (mode == "udp-join") {
+    t = UdpTransport::join(arg1.empty() ? "127.0.0.1" : arg1, (uint16_t)(arg2.empty() ? 27777 : atoi(arg2.c_str())));
+    role = Role::Client;
+  } else {
+    printf("unknown mode %s\n", mode.c_str());
+    return 2;
+  }
+  auto imp_t = std::make_unique<ImpairedTransport>(std::move(t));
+  imp_t->set_params(imp);
+  Session ses(std::move(imp_t), role, name, BTT_VERSION);
+  ses.set_pose_rate(s.pose_send_hz);
+
+  double start = now_sec(), last_print = 0;
+  std::string printed_code, my_map = "/Game/Maps/Beta/Map_Beta_Basement";
+  int sounds_echoed = 0;
+  while (g_run) {
+    double now = now_sec();
+    ses.update(now);
+    if (!ses.join_code().empty() && ses.join_code() != printed_code) {
+      printed_code = ses.join_code();
+      printf("\n  JOIN CODE: %s\n\n", printed_code.c_str());
+    }
+    ses.set_local_pose(scripted_pose(pattern, now - start));
+    std::vector<NetEvent> evs;
+    ses.pop_events(evs);
+    for (auto& e : evs) {
+      if (e.type == EventType::Map) {
+        BTT_INFO("peer map: %s", e.s1.c_str());
+        if (role == Role::Client && e.s1 != my_map) {
+          my_map = e.s1;  // follow the host like the game would
+          NetEvent m;
+          m.type = EventType::Map;
+          m.s1 = my_map;
+          ses.send_event(m);
+        }
+      } else if (e.type == EventType::Sound) {
+        BTT_INFO("peer sound: %s at (%.0f, %.0f, %.0f) vol %.2f", e.s1.c_str(), e.v.x, e.v.y, e.v.z, e.f0);
+        NetEvent echo = e;
+        echo.t_ms = 0;
+        echo.v = scripted_pose(pattern, now - start).head.p;
+        ses.send_event(echo);
+        ++sounds_echoed;
+      } else if (e.type == EventType::Notice) {
+        BTT_INFO("peer notice: %s", e.s1.c_str());
+      }
+    }
+    static SessionState prev = SessionState::Idle;
+    if (ses.state() != prev) {
+      prev = ses.state();
+      BTT_INFO("state -> %s", session_state_name(prev));
+      if (prev == SessionState::Connected) {
+        NetEvent m;
+        m.type = EventType::Map;
+        m.s1 = my_map;
+        ses.send_event(m);
+        NetEvent n;
+        n.type = EventType::Notice;
+        n.s1 = "Hello from " + name;
+        ses.send_event(n);
+      }
+    }
+    if (now - last_print >= 1.0) {
+      last_print = now;
+      auto st = ses.stats(now);
+      PoseFrame rp;
+      bool have = ses.sample_remote(now, rp);
+      printf("[%6.1fs] %-12s link=%-14s rtt=%5.0fms loss=%4.1f%% jitter=%4.1fms in=%llu out=%llu echoed=%d %s\n",
+             now - start, session_state_name(ses.state()), link_state_name(ses.link_state()), st.rtt_ms, st.loss_pct,
+             st.jitter_ms, (unsigned long long)st.pkts_in, (unsigned long long)st.pkts_out, sounds_echoed,
+             have ? ("remote head=(" + std::to_string((int)rp.head.p.x) + "," + std::to_string((int)rp.head.p.y) + "," +
+                     std::to_string((int)rp.head.p.z) + ")").c_str()
+                  : "");
+    }
+    if (ses.state() == SessionState::Disconnected) {
+      printf("disconnected: %s\n", ses.error().c_str());
+      break;
+    }
+    if (seconds > 0 && now - start > seconds) break;
+    Sleep(2);
+  }
+  ses.close();
+  net_cleanup();
+  return ses.error().empty() || ses.error() == "the other player left the session" ? 0 : 1;
+}

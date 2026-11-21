@@ -1,0 +1,13 @@
+build/
+dist/
+*.log
+*.pdb
+*.obj
+*.ilk
+.vs/
+# developer-only overrides and secrets must never be committed or shipped
+dev.ini
+*.secret
+.env
+release.local.json
+third_party/ue4ss/*.zip
