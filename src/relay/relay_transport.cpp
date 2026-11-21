@@ -69,8 +69,31 @@ void RelayTransport::fail(const std::string& why) {
   state_ = LinkState::Failed;
 }
 
+// Nearest Unity Relay region from the PC's time zone (the host decides the region for both players).
+// Without this Unity used us-central1 (Iowa) for everyone: ~220 ms between two players in the UK.
+static std::string auto_region() {
+  TIME_ZONE_INFORMATION tz{};
+  DWORD mode = GetTimeZoneInformation(&tz);
+  long bias = tz.Bias + (mode == TIME_ZONE_ID_DAYLIGHT ? tz.DaylightBias : 0);  // UTC = local + bias
+  double off = -bias / 60.0;                                                    // hours east of UTC
+  if (off >= -1.0 && off < 1.5) return "europe-west4";       // UK, Ireland, Portugal, W/Central Europe
+  if (off >= 1.5 && off < 2.5) return "europe-central2";     // Poland, Balkans, South Africa
+  if (off >= 2.5 && off < 4.5) return "europe-north1";       // Finland, Baltics, Turkey, Middle East
+  if (off >= 4.5 && off < 6.5) return "asia-south1";         // India
+  if (off >= 6.5 && off < 8.5) return "asia-southeast1";     // SE Asia, China
+  if (off >= 8.5 && off < 10.0) return "asia-northeast1";    // Japan, Korea
+  if (off >= 10.0) return "australia-southeast1";            // Australia, NZ
+  if (off >= -4.0 && off < -1.0) return "southamerica-east1";
+  if (off >= -6.0 && off < -4.0) return off >= -5.0 ? "us-east1" : "us-central1";
+  return "us-west1";
+}
+
 // Control-plane work happens off the network thread (HTTPS can take hundreds of ms).
 void RelayTransport::worker() {
+  if (is_host_ && cfg_.region.empty()) {
+    cfg_.region = auto_region();
+    BTT_INFO("relay: using nearest region %s (set Relay.Region in config.ini to override)", cfg_.region.c_str());
+  }
   RelayApi api(cfg_.project_id, cfg_.environment);
   AuthToken tok;
   ApiError err;

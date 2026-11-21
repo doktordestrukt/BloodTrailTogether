@@ -20,6 +20,7 @@ struct Xform {
 struct PoseFrame {
   Xform head, left, right;
   Xform body;  // player pawn root (floor-level body position + yaw), drives the remote body model
+  Xform heldL, heldR;  // world transform of the mesh held in each hand (valid when flags bit2/bit3)
   uint8_t flags = 0;  // bit0 left valid, bit1 right valid
   float height_scale = 1.0f;
 };

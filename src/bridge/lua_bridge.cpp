@@ -2,7 +2,7 @@
 //
 // Request lines (Lua -> DLL):
 //   H <lua-mod-version>                         handshake (first frame after connecting)
-//   P head(7) left(7) right(7) body(7) flags    local VR pose + body root, world space (cm)
+//   P head(7) left(7) right(7) body(7) heldL(7) heldR(7) flags    local VR pose + body root, world space (cm)
 //   X <game event line>                         reliable game event for the other player's script
 //   M <map package path>                        current map, e.g. /Game/Maps/Sandbox/Map_Sandbox
 //   S <asset path> x y z volume pitch           a player-originated sound to share
@@ -12,7 +12,7 @@
 // Reply lines (DLL -> Lua):
 //   CFG <shareRadiusCm> <devMode 0/1>           (only in reply to H)
 //   ST <state> <role> <quality 0-3> <rttMs> <lossPct> <simulated 0/1> <code|-> <peerName|-> <sameMap 0/1>
-//   RP - | RP head(7) left(7) right(7) body(7) flags     remote pose (interpolated)
+//   RP - | RP head(7) left(7) right(7) body(7) heldL(7) heldR(7) flags     remote pose (interpolated)
 //   GX <game event line>                        game event from the other player's script
 //   TR <map package path>                       travel there (client follows host)
 //   SN <asset path> x y z volume pitch          play this sound at that location
@@ -71,13 +71,13 @@ std::string lua_handle_request(const std::string& req) {
         break;
       }
       case 'P': {
-        float v[28];
-        if (!parse_floats(in, v, 28)) break;
+        float v[42];
+        if (!parse_floats(in, v, 42)) break;
         int flags = 0;
         in >> flags;
         PoseFrame f;
-        Xform* xs[4] = {&f.head, &f.left, &f.right, &f.body};
-        for (int i = 0; i < 4; ++i) {
+        Xform* xs[6] = {&f.head, &f.left, &f.right, &f.body, &f.heldL, &f.heldR};
+        for (int i = 0; i < 6; ++i) {
           float* p = v + i * 7;
           xs[i]->p = {p[0], p[1], p[2]};
           xs[i]->q = qnormalize({p[3], p[4], p[5], p[6]});
@@ -139,6 +139,8 @@ std::string lua_handle_request(const std::string& req) {
     put_xform(out, rp.left);
     put_xform(out, rp.right);
     put_xform(out, rp.body);
+    put_xform(out, rp.heldL);
+    put_xform(out, rp.heldR);
     out += " " + std::to_string(rp.flags) + "\n";
   } else {
     out += "RP -\n";

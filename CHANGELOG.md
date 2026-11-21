@@ -4,6 +4,18 @@ Versioning: [Semantic Versioning](https://semver.org). The version lives in `CMa
 `release.json` and `Scripts/main.lua` (the release script refuses to build if they differ).
 The network protocol version (`kProtocolVersion`) changes only when old and new clients can no longer talk.
 
+## [0.3.0] - 2026-11-21
+### Fixed
+- Remote body legs crossing/spinning: bodies get an AIController carrying the look rotation (ALS looking-direction mode) and the movement component's last-update transform is kept current (foot locking).
+- Head + neck follow the headset; two-bone arm IK to each controller via a PoseableMesh copy.
+- NPC hits replayed relative to the hit bone (no more floating blood); remote body never ragdolls while alive.
+- Frame rate: cached player controller, NPC registry via NotifyOnNewObject; assets that fail to load are not retried every frame.
+- Relay region chosen from the time zone (europe-west4 for Europe: ~60 ms instead of ~220 ms).
+- Remote gunshots use ATT_gunshot attenuation (3D, distance falloff); other remote sounds without 3D settings use a short range.
+### Added
+- Protocol v3 (pose carries both held items). Held items are sent as multi-part meshes (`held` / `heldpart`), refreshed while held.
+- Head lamp / night vision sync, NPC body drag + throw sync, map prop grab/throw sync.
+
 ## [0.2.1] - 2026-11-21
 ### Fixed (from the first real two-player session)
 - Remote body sank ~1 m: VRExpansion pawns have their actor at the floor (measured), not at capsule centre.

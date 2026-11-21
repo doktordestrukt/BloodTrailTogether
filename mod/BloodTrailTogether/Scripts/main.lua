@@ -7,7 +7,7 @@
 -- Everything that touches the game is wrapped in pcall: a failure disables that feature and is
 -- logged to UE4SS.log / BloodTrailTogether.log instead of crashing the game.
 
-local VERSION = "0.2.1"
+local VERSION = "0.3.0"
 local TAG = "[BloodTrailTogether] "
 local UEHelpers = require("UEHelpers")
 
@@ -140,8 +140,38 @@ local function objPath(o)
     return full:match("^%S+%s+(.+)$") or full
 end
 
+-- PERFORMANCE: UEHelpers.GetPlayerController()/GetPlayer()/GetWorld() each scan EVERY object in the
+-- game (FindAllOf). Calling them several times per frame was the main cause of the frame-rate
+-- drops in v0.2.x. The controller is cached and only looked up again when it becomes invalid
+-- (map change), at most twice a second.
+local cachedPC, lastPCSearch = nil, -10
+local function getPC()
+    if valid(cachedPC) then return cachedPC end
+    local now = os.clock()
+    if now - lastPCSearch < 0.5 then return nil end
+    lastPCSearch = now
+    local pc = UEHelpers.GetPlayerController()
+    if valid(pc) then cachedPC = pc return pc end
+    return nil
+end
+local function getPawn()
+    local pc = getPC()
+    if not pc then return nil end
+    local ok, pawn = pcall(function() return pc.Pawn end)
+    if ok and valid(pawn) then return pawn end
+    return nil
+end
+local function getWorld()
+    local pc = getPC()
+    if pc then
+        local ok, w = pcall(function() return pc:GetWorld() end)
+        if ok and valid(w) then return w end
+    end
+    return nil
+end
+
 local function currentMapPath()
-    local world = UEHelpers.GetWorld()
+    local world = getWorld()
     if not valid(world) then return nil end
     local p = objPath(world)                 -- /Game/Maps/Sandbox/Map_Sandbox.Map_Sandbox
     return p:match("^(.-)%.[^/]+$") or p     -- /Game/Maps/Sandbox/Map_Sandbox
@@ -152,20 +182,64 @@ local function findAsset(path)
     local o = assetCache[path]
     if valid(o) then return o end
     o = StaticFindObject(path)
-    if not valid(o) then
+    -- load from disk at most once per path: retrying a failing load every frame stalled and
+    -- then crashed the game in testing
+    if not valid(o) and o ~= false and assetCache[path] ~= false then
         pcall(LoadAsset, path:match("^(.-)%.") or path)
         o = StaticFindObject(path)
     end
     if valid(o) then assetCache[path] = o return o end
+    assetCache[path] = false
     return nil
 end
+
+------------------------------------------------------------------------------- quaternion helpers ({x,y,z,w})
+local function qmul(a, b)
+    return { a[4] * b[1] + a[1] * b[4] + a[2] * b[3] - a[3] * b[2],
+             a[4] * b[2] - a[1] * b[3] + a[2] * b[4] + a[3] * b[1],
+             a[4] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[4],
+             a[4] * b[4] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3] }
+end
+local function qconj(q) return { -q[1], -q[2], -q[3], q[4] } end
+local function qnorm(q)
+    local n = math.sqrt(q[1] * q[1] + q[2] * q[2] + q[3] * q[3] + q[4] * q[4])
+    if n < 1e-9 then return { 0, 0, 0, 1 } end
+    return { q[1] / n, q[2] / n, q[3] / n, q[4] / n }
+end
+-- shortest rotation that turns direction u into direction v
+local function fromTo(ux, uy, uz, vx, vy, vz)
+    local lu = math.sqrt(ux * ux + uy * uy + uz * uz)
+    local lv = math.sqrt(vx * vx + vy * vy + vz * vz)
+    if lu < 1e-6 or lv < 1e-6 then return { 0, 0, 0, 1 } end
+    ux, uy, uz, vx, vy, vz = ux / lu, uy / lu, uz / lu, vx / lv, vy / lv, vz / lv
+    local d = ux * vx + uy * vy + uz * vz
+    if d < -0.9999 then
+        local ax, ay, az = 0, -uz, uy
+        if ay * ay + az * az < 1e-6 then ax, ay, az = -uz, 0, ux end
+        return qnorm({ ax, ay, az, 0 })
+    end
+    return qnorm({ uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx, 1 + d })
+end
+local function qv(q, x, y, z) return qrot(q[1], q[2], q[3], q[4], x, y, z) end
 
 ------------------------------------------------------------------------------- local VR pose
 local controllers = { left = nil, right = nil }
 local frameNo = 0
+local headQuat = { 0, 0, 0, 1 }
 
 local function scanControllers()
     controllers.left, controllers.right = nil, nil
+    -- Normal case: the VRExpansion pawn's own grip controllers (no object scan needed).
+    local pawn = getPawn()
+    if pawn then
+        pcall(function()
+            local l, r = pawn["Left Grip Motion Controller"], pawn["Right Grip Motion Controller"]
+            if valid(l) then controllers.left = l end
+            if valid(r) then controllers.right = r end
+        end)
+        if controllers.left and controllers.right then return end
+    end
+    -- Other pawns: search motion controller components (rare, throttled by the caller).
     local all = FindAllOf("MotionControllerComponent")
     if not all then return end
     for _, c in ipairs(all) do
@@ -190,10 +264,140 @@ end
 local localHead = { 0, 0, 0 }
 local localLeft, localRight = { 0, 0, 0 }, { 0, 0, 0 }
 
+-- What each hand holds: the mesh of the gripped object (gun, magazine, knife...), streamed with
+-- its exact world transform so the other player sees it in the right hand, at the right angle,
+-- including reloads (the magazine in the other hand).
+local heldState = { L = { name = nil, comp = nil }, R = { name = nil, comp = nil } }
+local heldEvents = {}   -- "held ..." / "heldpart ..." lines to send
+local vrBaseClass = nil
+-- v0.3 extras (torch / night vision, grabbing and throwing bodies and props). One table instead of
+-- many locals: Lua allows at most 200 locals per function and this file's main chunk is close.
+local EX = { grab = {}, dropAt = {}, remoteGrab = {}, remoteVis = { lamp = 0, nv = 0 }, props = {}, propCache = {}, levelOf = {} }
+
+-- Objects that are part of the map (loaded with it, not spawned at runtime) exist in both games
+-- under the same name.
+function EX.isLevel(a)
+    local path = objPath(a)
+    local r = EX.levelOf[path]
+    if r == nil then
+        local ok, v = pcall(function()
+            local f = (EObjectFlags and EObjectFlags.RF_WasLoaded) or 0x80000
+            return a:HasAnyFlags(f)
+        end)
+        r = ok and v == true
+        EX.levelOf[path] = r
+    end
+    return r
+end
+
+-- K2_GetComponentsByClass returns a Lua table or a TArray depending on the UE4SS build
+local function componentsOf(actor, cls)
+    local out = {}
+    local ok, comps = pcall(function() return actor:K2_GetComponentsByClass(cls) end)
+    if not ok or not comps then return out end
+    if type(comps) == "table" then
+        for _, c in ipairs(comps) do out[#out + 1] = c end
+    else
+        pcall(function() comps:ForEach(function(_, e) out[#out + 1] = e:get() end) end)
+    end
+    return out
+end
+
+local NPC_CLASS_PATH = "/Game/characters/Human/Blueprints/CharacterLogic/BP_NPC_Man.BP_NPC_Man_C"
+local CLS = {}
+local function cls(path)
+    local c = CLS[path]
+    if valid(c) then return c end
+    c = StaticFindObject(path)
+    CLS[path] = c
+    return c
+end
+
+-- Every visible mesh of the held thing (receiver, slide, pump, magazine, scope, attached flashlight...)
+-- with its transform relative to the gripped component. Returns the part lines and a signature.
+local function heldParts(actor, main)
+    local parts, sig = {}, {}
+    local mt = main:K2_GetComponentToWorld()
+    local mq = { mt.Rotation.X, mt.Rotation.Y, mt.Rotation.Z, mt.Rotation.W }
+    local ms = (mt.Scale3D.X ~= 0) and mt.Scale3D.X or 1
+    local iq = qconj(mq)
+    local function add(c, kind)
+        if #parts >= 12 or not valid(c) then return end
+        local okV, vis = pcall(function() return c:IsVisible() and not c.bHiddenInGame end)
+        if not okV or not vis then return end
+        local mesh = kind == "K" and c.SkeletalMesh or c.StaticMesh
+        if not valid(mesh) then return end
+        local t = c:K2_GetComponentToWorld()
+        local rx, ry, rz = qv(iq, t.Translation.X - mt.Translation.X, t.Translation.Y - mt.Translation.Y, t.Translation.Z - mt.Translation.Z)
+        local rq = qmul(iq, { t.Rotation.X, t.Rotation.Y, t.Rotation.Z, t.Rotation.W })
+        local path = objPath(mesh)
+        parts[#parts + 1] = string.format("%s %s %.2f %.2f %.2f %.4f %.4f %.4f %.4f %.3f", path, kind,
+            rx / ms, ry / ms, rz / ms, rq[1], rq[2], rq[3], rq[4], t.Scale3D.X / ms)
+        sig[#sig + 1] = path
+    end
+    local function addActor(a)
+        for _, c in ipairs(componentsOf(a, cls("/Script/Engine.SkeletalMeshComponent"))) do add(c, "K") end
+        for _, c in ipairs(componentsOf(a, cls("/Script/Engine.StaticMeshComponent"))) do add(c, "S") end
+    end
+    addActor(actor)
+    -- magazines, lights, suppressors... that are separate actors attached to the gun
+    pcall(function()
+        local att = {}
+        actor:GetAttachedActors(att)
+        for _, a in ipairs(att) do
+            local aa = type(a) == "userdata" and a.get and a:get() or a
+            if valid(aa) then addActor(aa) end
+        end
+    end)
+    return parts, table.concat(sig, ","), ms
+end
+
+local function resolveHeld(side, ctrl)
+    local st = heldState[side]
+    local obj = nil
+    pcall(function()
+        local arr = ctrl.GrippedObjects
+        if arr:GetArrayNum() > 0 then obj = arr[1].GrippedObject end
+    end)
+    local name = valid(obj) and obj:GetFullName() or nil
+    -- re-read the parts twice a second while held: a magazine coming out / going in shows up
+    if name ~= st.name or (name and frameNo % 45 == 0) then
+        if name ~= st.name then st.name, st.comp, st.actor, st.sig = name, nil, nil, nil end
+        local parts, sig, ms = {}, "", 1
+        if name then
+            pcall(function()
+                local actor, main = obj, nil
+                if obj:IsA(cls("/Script/Engine.Actor")) then
+                    main = obj:K2_GetRootComponent()
+                else
+                    actor, main = obj:GetOwner(), obj
+                end
+                -- an NPC body being dragged is not drawn as a "held item" (the body itself is synced)
+                if actor:IsA(cls(NPC_CLASS_PATH)) then return end
+                -- a map object exists in the other game too: the real one is moved there (prop sync)
+                if EX.isLevel(actor) then st.comp, st.actor = main, actor return end
+                parts, sig, ms = heldParts(actor, main)
+                st.comp, st.actor = main, actor
+            end)
+        end
+        if sig ~= st.sig then
+            st.sig = sig
+            heldEvents[#heldEvents + 1] = string.format("held %s %d %.3f", side, #parts, ms)
+            for i, p in ipairs(parts) do heldEvents[#heldEvents + 1] = string.format("heldpart %s %d %s", side, i, p) end
+            if sig ~= "" then log("holding in " .. side .. " hand: " .. sig) end
+        end
+    end
+    if valid(st.comp) and st.sig and st.sig ~= "" then
+        local t = st.comp:K2_GetComponentToWorld()
+        return { t.Translation.X, t.Translation.Y, t.Translation.Z, t.Rotation.X, t.Rotation.Y, t.Rotation.Z, t.Rotation.W }
+    end
+    return nil
+end
+
 -- Returns the "P ..." request line or nil
 local function readLocalPose()
-    local pc = UEHelpers.GetPlayerController()
-    if not valid(pc) then return nil end
+    local pc = getPC()
+    if not pc then return nil end
     local cam = pc.PlayerCameraManager
     if not valid(cam) then return nil end
     local hl = cam:GetCameraLocation()
@@ -201,9 +405,10 @@ local function readLocalPose()
     local hx, hy, hz = hl.X, hl.Y, hl.Z
     local qx, qy, qz, qw = rotToQuat(hr.Pitch, hr.Yaw, hr.Roll)
     localHead[1], localHead[2], localHead[3] = hx, hy, hz
+    headQuat[1], headQuat[2], headQuat[3], headQuat[4] = qx, qy, qz, qw
 
-    if frameNo % CONTROLLER_RESCAN_FRAMES == 1 or not valid(controllers.left) or not valid(controllers.right) then
-        if frameNo % 30 == 1 then pcall(scanControllers) end
+    if (not valid(controllers.left) or not valid(controllers.right)) and frameNo % 120 == 1 then
+        pcall(scanControllers)
     end
     local flags = 0
     local L = { hx, hy, hz - 40, 0, 0, 0, 1 }
@@ -218,35 +423,40 @@ local function readLocalPose()
     end
     localLeft[1], localLeft[2], localLeft[3] = L[1], L[2], L[3]
     localRight[1], localRight[2], localRight[3] = R[1], R[2], R[3]
-    -- Body: floor point under the head, facing the head's yaw. The VR pawn's actor location is
-    -- already at the floor (measured: actor Z 0.6 with floor 0); ordinary characters have it at the
-    -- capsule centre. Pick whichever gives a plausible eye height.
+    -- Body: floor point under the head. VRExpansion pawns have their actor ON the floor
+    -- (measured: actor Z 0.6, floor 0); other pawns at the capsule centre.
     local floorZ = hz - 165
-    pcall(function()
-        local pawn = UEHelpers.GetPlayer()
-        if valid(pawn) then
+    local pawn = getPawn()
+    if pawn then
+        pcall(function()
             local pz = pawn:K2_GetActorLocation().Z
-            local vrBase = StaticFindObject("/Script/VRExpansionPlugin.VRBaseCharacter")
-            if valid(vrBase) and pawn:IsA(vrBase) then
-                floorZ = pz                                   -- VRExpansion: actor sits on the floor
+            if not vrBaseClass then vrBaseClass = StaticFindObject("/Script/VRExpansionPlugin.VRBaseCharacter") end
+            if valid(vrBaseClass) and pawn:IsA(vrBaseClass) then
+                floorZ = pz
             else
-                local half = 0                                -- plain pawns (VROrigin) have no capsule
+                local half = 0
                 pcall(function() half = pawn.CapsuleComponent:GetScaledCapsuleHalfHeight() end)
                 floorZ = pz - half
             end
-        end
-    end)
-    -- What the hands hold (so the other side shows a gun only when you really have one)
-    pcall(function()
-        local pawn = UEHelpers.GetPlayer()
-        if pawn["Left Grip Motion Controller"]:HasGrippedObjects() then flags = flags | 4 end
-        if pawn["Right Grip Motion Controller"]:HasGrippedObjects() then flags = flags | 8 end
-    end)
+        end)
+    end
+    -- held items
+    local HL, HR = { 0, 0, 0, 0, 0, 0, 1 }, { 0, 0, 0, 0, 0, 0, 1 }
+    if valid(controllers.left) then
+        local ok, t = pcall(resolveHeld, "L", controllers.left)
+        if ok and t then HL = t flags = flags | 4 end
+    end
+    if valid(controllers.right) then
+        local ok, t = pcall(resolveHeld, "R", controllers.right)
+        if ok and t then HR = t flags = flags | 8 end
+    end
     local yaw = select(2, quatToRot(qx, qy, qz, qw))
     local bqx, bqy, bqz, bqw = rotToQuat(0, yaw, 0)
-    return string.format("P %.2f %.2f %.2f %.5f %.5f %.5f %.5f %.2f %.2f %.2f %.5f %.5f %.5f %.5f %.2f %.2f %.2f %.5f %.5f %.5f %.5f %.2f %.2f %.2f %.5f %.5f %.5f %.5f %d",
+    local f7 = " %.2f %.2f %.2f %.5f %.5f %.5f %.5f"
+    return string.format("P" .. f7 .. f7 .. f7 .. f7 .. f7 .. f7 .. " %d",
         hx, hy, hz, qx, qy, qz, qw, L[1], L[2], L[3], L[4], L[5], L[6], L[7], R[1], R[2], R[3], R[4], R[5], R[6], R[7],
-        hx, hy, floorZ, bqx, bqy, bqz, bqw, flags)
+        hx, hy, floorZ, bqx, bqy, bqz, bqw,
+        HL[1], HL[2], HL[3], HL[4], HL[5], HL[6], HL[7], HR[1], HR[2], HR[3], HR[4], HR[5], HR[6], HR[7], flags)
 end
 
 ------------------------------------------------------------------------------- remote avatar
@@ -255,7 +465,7 @@ local avatarDisabled = false
 local IDENTITY = { Rotation = { X = 0, Y = 0, Z = 0, W = 1 }, Translation = { X = 0, Y = 0, Z = -100000 }, Scale3D = { X = 1, Y = 1, Z = 1 } }
 
 local function spawnActor(classPath)
-    local world = UEHelpers.GetWorld()
+    local world = getWorld()
     local gs = UEHelpers.GetGameplayStatics()
     local cls = StaticFindObject(classPath)
     if not (valid(world) and valid(gs) and valid(cls)) then return nil end
@@ -391,7 +601,6 @@ local function showNote(text)
     noteUntil = frameNo + 90 * 4
 end
 
-local headQuat = { 0, 0, 0, 1 }
 local function updateNote()
     if not valid(note) then return end
     if frameNo > noteUntil then
@@ -423,7 +632,8 @@ local function captureSound(sound, x, y, z, vol, pitch)
     if not valid(sound) or not nearLocalPlayer(x, y, z) then return end
     local path = objPath(sound)
     -- NPC sounds (footsteps, voices, gore) happen in both games already; only share the player's own.
-    if path:find("/NPC/", 1, true) or path:find("_NPC_", 1, true) or path:find("/characters/", 1, true) then return end
+    if path:find("/NPC/", 1, true) or path:find("_NPC_", 1, true) or path:find("/characters/", 1, true)
+        or path:find("/blood/", 1, true) or path:find("Gore", 1, true) or path:find("/body_fall/", 1, true) then return end
     soundsCaptured = soundsCaptured + 1
     pendingSounds[#pendingSounds + 1] = string.format("S %s %.1f %.1f %.1f %.3f %.3f", objPath(sound), x, y, z, vol or 1, pitch or 1)
 end
@@ -458,6 +668,23 @@ local function installSoundHooks()
     end
 end
 
+-- The player's own gun sounds are made for the shooter: no 3D settings, so the other player heard
+-- them "in his ear" at full volume. They are now played with the game's own gunshot attenuation
+-- (the one its NPC guns use): direction and distance falloff. Other player sounds without 3D
+-- settings (magazines, foley) get a short-range attenuation.
+local ATT_GUN = "/Game/Audio/attenuations/ATT_gunshot.ATT_gunshot"
+local ATT_NEAR = "/Game/Audio/attenuations/ATT_shelldrop.ATT_shelldrop"
+local function attenuationFor(path, snd)
+    local lp = path:lower()
+    if lp:find("fire") or lp:find("shot") or lp:find("gun") or lp:find("blast") or lp:find("suppressed") then
+        return findAsset(ATT_GUN)
+    end
+    local own = nil
+    pcall(function() own = snd.AttenuationSettings end)
+    if valid(own) then return nil end      -- already a 3D sound
+    return findAsset(ATT_NEAR)
+end
+
 local function playRemoteSound(path, x, y, z, vol, pitch)
     local snd = findAsset(path)
     if not snd then
@@ -465,16 +692,18 @@ local function playRemoteSound(path, x, y, z, vol, pitch)
         if soundsMissing <= 5 then log("remote sound asset not found: " .. path) end
         return
     end
-    local world = UEHelpers.GetWorld()
+    local world = getWorld()
     local gs = UEHelpers.GetGameplayStatics()
+    local att = nil
+    pcall(function() att = attenuationFor(path, snd) end)
     playingRemote = true
     local ok, err = pcall(function()
-        gs:PlaySoundAtLocation(world, snd, { X = x, Y = y, Z = z }, { Pitch = 0, Yaw = 0, Roll = 0 }, vol, pitch, 0, nil, nil, nil)
+        gs:PlaySoundAtLocation(world, snd, { X = x, Y = y, Z = z }, { Pitch = 0, Yaw = 0, Roll = 0 }, vol, pitch, 0, att, nil, nil)
     end)
     playingRemote = false
     if ok then
         soundsPlayed = soundsPlayed + 1
-        if soundsPlayed <= 3 then log(string.format("played remote sound %s at (%.0f, %.0f, %.0f)", path, x, y, z)) end
+        if soundsPlayed <= 5 then log(string.format("played remote sound %s at (%.0f, %.0f, %.0f), 3D: %s", path, x, y, z, valid(att) and objPath(att) or "its own")) end
     else
         log("playing remote sound failed: " .. tostring(err))
     end
@@ -490,7 +719,7 @@ local function travelTo(mapPath)
     travelling = true
     pcall(function()
         local gs = UEHelpers.GetGameplayStatics()
-        gs:OpenLevel(UEHelpers.GetWorld(), FName(mapPath), true, "")
+        gs:OpenLevel(getWorld(), FName(mapPath), true, "")
     end)
 end
 
@@ -618,15 +847,17 @@ local function installHitHook()
     log((ok and "hooked " or "could not hook ") .. "EventReceiveDamageNPC" .. (ok and "" or (": " .. tostring(err))))
 end
 
+local pup = nil   -- cached components of the remote body (property lookups are slow; do them once)
+
 local function destroyPuppet()
     if valid(puppet) then pcall(function() puppet:K2_DestroyActor() end) end
-    puppet, puppetLast = nil, nil
+    puppet, puppetLast, pup = nil, nil, nil
 end
 
 local function spawnPuppet(x, y, z, yaw)
     pcall(LoadAsset, NPC_PKG)
     local cls = StaticFindObject(NPC_CLASS)
-    local world = UEHelpers.GetWorld()
+    local world = getWorld()
     local gs = UEHelpers.GetGameplayStatics()
     if not (valid(cls) and valid(world) and valid(gs)) then return nil end
     local qx, qy, qz, qw = rotToQuat(0, yaw, 0)
@@ -637,138 +868,457 @@ local function spawnPuppet(x, y, z, yaw)
     gs:FinishSpawningActor(a, t)
     if not valid(a) then return nil end
     pcall(function() a:DetachFromControllerPendingDestroy() end)
-    -- Stay in "walking" mode (so the animation does not play a fall) but stop the movement
-    -- component from simulating: we place the body ourselves every frame.
+    -- Stay in "walking" mode (no fall animation) but don't let the movement component simulate.
     pcall(function() a.CharacterMovement:SetMovementMode(1, 0) end)
     pcall(function() a.CharacterMovement:SetComponentTickEnabled(false) end)
     pcall(function() a.CharacterMovement.GravityScale = 0 end)
-    pcall(function() a.CapsuleComponent:SetCollisionEnabled(0) end)  -- don't block you; the mesh still takes bullets
+    pcall(function() a.CapsuleComponent:SetCollisionEnabled(0) end)  -- don't block players; the mesh still takes bullets
     pcall(function() a.HealthOverall = 100000 end)                   -- never dies locally; the owner decides
     pcall(function() a.DebugTextNPC:SetHiddenInGame(true, false) end)
     pcall(function() a.DebugTextLocal:SetHiddenInGame(true, false) end)
+    pcall(function() a.StaticMesh:SetVisibility(false, true) end)    -- the NPC's own pistol: never shown
+    pcall(function() a.Slidemesh:SetVisibility(false, true) end)
     installHitHook()
+    -- The game's locomotion animation (ALS) reads where a character LOOKS from its controller. A
+    -- body without one "looks" at yaw 0 forever, so the animation kept playing turn-on-the-spot
+    -- steps against the yaw we set: crossed, spinning legs (v0.3 test). Each body gets a bare
+    -- AIController - no behaviour tree, no perception - that only carries the look rotation.
+    local okC, ctrl = pcall(function()
+        local c = spawnActor("/Script/AIModule.AIController")
+        if not c then return nil end
+        c:Possess(a)
+        c:SetControlRotation({ Pitch = 0, Yaw = yaw, Roll = 0 })
+        return c
+    end)
+    return a, (okC and valid(ctrl)) and ctrl or nil
+end
+
+-- The movement component is not ticking (we place the bodies ourselves), so its "last update"
+-- rotation/location never changed. ALS foot locking measures how far the body turned since then
+-- and twisted the planted feet by that (growing) angle every frame: legs spinning like a propeller.
+-- Keep them current.
+local function syncMovementBase(actor, cm)
+    pcall(function()
+        local r = actor:K2_GetActorRotation()
+        local qx, qy, qz, qw = rotToQuat(r.Pitch, r.Yaw, r.Roll)
+        cm.LastUpdateRotation = { X = qx, Y = qy, Z = qz, W = qw }
+        local l = actor:K2_GetActorLocation()
+        cm.LastUpdateLocation = { X = l.X, Y = l.Y, Z = l.Z }
+    end)
+end
+
+-- Visual body with full upper-body control: a PoseableMesh copies the NPC's animated pose (legs,
+-- walking, crouch) every frame; we then override head and arms. The animated NPC mesh stays as the
+-- invisible hit/gore body (collision + wound painting); its gore materials are shared with the copy.
+local BODY_PARTS = { "Costume", "hair", "Eyes", "Mouth" }
+local function setupBody(a)
+    local P = { actor = a, mesh = a.Mesh, cap = a.CapsuleComponent, cm = a.CharacterMovement }
+    P.anim = P.mesh:GetAnimInstance()
+    P.relLoc = P.mesh.RelativeLocation
+    P.relLoc = { X = P.relLoc.X, Y = P.relLoc.Y, Z = P.relLoc.Z }
+    local rr = P.mesh.RelativeRotation
+    P.relRot = { Pitch = rr.Pitch, Yaw = rr.Yaw, Roll = rr.Roll }
+    pcall(function() P.anim.OverlayState = 0 end)                     -- relaxed, empty-hand stance
+    -- Don't let VR hands grab or drag the other player (VRTraceChannel = GameTraceChannel1 = 14).
+    pcall(function() P.mesh:SetCollisionResponseToChannel(14, 0) end)
+    local ok, err = pcall(function()
+        local cls = StaticFindObject("/Script/Engine.PoseableMeshComponent")
+        local pose = a:AddComponentByClass(cls, true, { Rotation = { X = 0, Y = 0, Z = 0, W = 1 }, Translation = { X = 0, Y = 0, Z = 0 }, Scale3D = { X = 1, Y = 1, Z = 1 } }, false)
+        if not valid(pose) then error("AddComponentByClass returned nothing") end
+        pose:K2_AttachToComponent(P.mesh, FName("None"), 2, 2, 2, true)     -- snap onto the NPC mesh
+        pose:SetSkeletalMesh(P.mesh.SkeletalMesh, true)
+        P.mesh.VisibilityBasedAnimTickOption = 0                            -- keep animating while hidden
+        P.pose = pose
+        -- every other skinned part of the NPC (clothes, hair, eyes, mouth, merged costume...) follows the IK copy
+        P.parts = {}
+        local skinCls = StaticFindObject("/Script/Engine.SkinnedMeshComponent")
+        local poseName, meshName = pose:GetFullName(), P.mesh:GetFullName()
+        local okC, comps = pcall(function() return a:K2_GetComponentsByClass(skinCls) end)
+        if not okC or not comps then okC, comps = pcall(function() return a:GetComponentsByClass(skinCls) end) end
+        local function consider(c)
+            if valid(c) then
+                local n = c:GetFullName()
+                if n ~= poseName and n ~= meshName then P.parts[#P.parts + 1] = c end
+            end
+        end
+        if okC and comps then
+            if type(comps) == "table" then
+                for _, c in ipairs(comps) do consider(c) end
+            else
+                pcall(function() comps:ForEach(function(_, e) consider(e:get()) end) end)
+            end
+        end
+        if #P.parts == 0 then
+            for _, n in ipairs(BODY_PARTS) do pcall(function() if valid(a[n]) then P.parts[#P.parts + 1] = a[n] end end) end
+        end
+        for _, c in ipairs(P.parts) do pcall(function() c:SetMasterPoseComponent(pose, true) end) end
+        P.hideMesh = function()
+            P.mesh:SetVisibility(false, false)                              -- children (wounds, decals) stay
+            pcall(function() P.mesh:SetRenderInMainPass(false) end)
+            for _, c in ipairs(P.parts) do pcall(function() c:SetMasterPoseComponent(pose, true) end) end
+        end
+        P.hideMesh()
+    end)
+    if not ok then
+        log("full-body IK unavailable (" .. tostring(err) .. "), using the animated body only")
+        P.pose = nil
+        pcall(function() P.mesh:SetVisibility(true, false) end)
+    end
+    return P
+end
+
+local function copyBodyMaterials(P)
+    if not P.pose then return end
+    pcall(function()
+        local n = P.mesh:GetNumMaterials()
+        for i = 0, n - 1 do P.pose:SetMaterial(i, P.mesh:GetMaterial(i)) end
+    end)
+end
+
+local function boneT(pose, name)
+    local t = pose:GetBoneTransformByName(FName(name), 0)            -- 0 = world space
+    return { t.Translation.X, t.Translation.Y, t.Translation.Z }, { t.Rotation.X, t.Rotation.Y, t.Rotation.Z, t.Rotation.W }
+end
+local function setBoneRot(pose, name, pos, q)
+    pose:SetBoneTransformByName(FName(name), { Rotation = { X = q[1], Y = q[2], Z = q[3], W = q[4] },
+        Translation = { X = pos[1], Y = pos[2], Z = pos[3] }, Scale3D = { X = 1, Y = 1, Z = 1 } }, 0)
+end
+-- rotate bone `name` so that the direction to `child` points along (dx,dy,dz)
+local function aimBone(pose, name, child, dx, dy, dz)
+    local bp, bq = boneT(pose, name)
+    local cp = boneT(pose, child)
+    local d = fromTo(cp[1] - bp[1], cp[2] - bp[2], cp[3] - bp[3], dx, dy, dz)
+    setBoneRot(pose, name, bp, qnorm(qmul(d, bq)))
+    return bp
+end
+
+-- Two-bone arm IK: shoulder -> elbow -> wrist reaches the controller; elbow bends down/out/back.
+local function solveArm(P, side, cx, cy, cz, cq, yaw)
+    local pose = P.pose
+    local up, lo, hand, fing = "upperarm_" .. side, "lowerarm_" .. side, "hand_" .. side, "middle_01_" .. side
+    local S = boneT(pose, up)
+    local Ep = boneT(pose, lo)
+    local Hp = boneT(pose, hand)
+    local a = math.sqrt(dist2(S[1], S[2], S[3], Ep[1], Ep[2], Ep[3]))
+    local b = math.sqrt(dist2(Ep[1], Ep[2], Ep[3], Hp[1], Hp[2], Hp[3]))
+    -- wrist sits ~7 cm behind the controller's grip point
+    local fx, fy, fz = qv(cq, 1, 0, 0)
+    local T = { cx - fx * 7, cy - fy * 7, cz - fz * 7 }
+    local dx, dy, dz = T[1] - S[1], T[2] - S[2], T[3] - S[3]
+    local d = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if d < 1 then return end
+    local dmax = (a + b) * 0.999
+    if d > dmax then d = dmax end
+    dx, dy, dz = dx / math.sqrt(dx * dx + dy * dy + dz * dz), dy / math.sqrt(dx * dx + dy * dy + dz * dz), dz / math.sqrt(dx * dx + dy * dy + dz * dz)
+    local x = (a * a - b * b + d * d) / (2 * d)
+    local h = math.sqrt(math.max(0, a * a - x * x))
+    -- pole: down, outward and slightly back relative to the body
+    local s = side == "l" and -1 or 1
+    local byaw = yaw * DEG
+    local Fx, Fy = math.cos(byaw), math.sin(byaw)
+    local Rx, Ry = -Fy, Fx
+    local px, py, pz = Rx * s * 0.6 - Fx * 0.3, Ry * s * 0.6 - Fy * 0.3, -1.0
+    local pd = px * dx + py * dy + pz * dz
+    px, py, pz = px - dx * pd, py - dy * pd, pz - dz * pd
+    local pl = math.sqrt(px * px + py * py + pz * pz)
+    if pl < 1e-4 then px, py, pz, pl = 0, 0, -1, 1 end
+    px, py, pz = px / pl, py / pl, pz / pl
+    local E = { S[1] + dx * x + px * h, S[2] + dy * x + py * h, S[3] + dz * x + pz * h }
+    aimBone(pose, up, lo, E[1] - S[1], E[2] - S[2], E[3] - S[3])
+    local E2 = boneT(pose, lo)
+    aimBone(pose, lo, hand, T[1] - E2[1], T[2] - E2[2], T[3] - E2[3])
+    -- hand: fingers point along the controller's forward
+    pcall(aimBone, pose, hand, fing, fx, fy, fz)
+end
+
+-- Head (and neck) follow the headset exactly: look up, down, left, right, tilt.
+local function solveHead(P, hq, actorYaw)
+    local pose = P.pose
+    local hp, cur = boneT(pose, "Head")
+    if not P.headOff then
+        -- the head's rotation relative to "looking straight ahead along the body", taken once
+        local bq = { rotToQuat(0, actorYaw, 0) }
+        P.headOff = qmul(qconj(bq), cur)
+    end
+    local target = qnorm(qmul(hq, P.headOff))
+    -- the neck takes half of the turn so a 90-degree look doesn't snap the head off the shoulders
+    pcall(function()
+        local d = qmul(target, qconj(cur))
+        if d[4] < 0 then d = { -d[1], -d[2], -d[3], -d[4] } end
+        local half = qnorm({ d[1], d[2], d[3], d[4] + 1 })
+        local np, nq = boneT(pose, "neck_01")
+        setBoneRot(pose, "neck_01", np, qnorm(qmul(half, nq)))
+        hp = boneT(pose, "Head")
+    end)
+    setBoneRot(pose, "Head", hp, target)
+end
+
+-- Things the other player holds (gun, magazine, knife...), drawn at the exact streamed transform.
+-- remoteHeld[side] = { ver, n, ms, parts = { [i] = { path, kind, rel pos/rot, scale } } }
+local remoteHeld = { L = { ver = 0, n = 0, parts = {} }, R = { ver = 0, n = 0, parts = {} } }
+local heldShown = { L = nil, R = nil }
+local function dropShown(h)
+    if not h then return end
+    for _, a in ipairs(h.actors) do if valid(a) then pcall(function() a:K2_DestroyActor() end) end end
+end
+local function destroyHeld()
+    for side, h in pairs(heldShown) do dropShown(h) heldShown[side] = nil end
+end
+
+local function meshPartActor(part)
+    local asset = findAsset(part.path)
+    if not asset then return nil end
+    local a
+    if part.kind == "K" then
+        a = spawnActor("/Script/Engine.SkeletalMeshActor")
+        if a then local c = a.SkeletalMeshComponent c:SetMobility(2) c:SetSkeletalMesh(asset, true) c:SetCollisionEnabled(0) end
+    else
+        a = spawnActor("/Script/Engine.StaticMeshActor")
+        if a then local c = a.StaticMeshComponent c:SetMobility(2) c:SetStaticMesh(asset) c:SetCollisionEnabled(0) end
+    end
     return a
+end
+
+local function updateHeldItem(side, on, x, y, z, qx, qy, qz, qw)
+    local want = remoteHeld[side]
+    local h = heldShown[side]
+    if h and (h.ver ~= want.ver or not valid(h.actors[1])) then dropShown(h) h, heldShown[side] = nil, nil end
+    local complete = want.n > 0
+    for i = 1, want.n do if not want.parts[i] then complete = false end end
+    if not on or not complete then
+        if h and not h.hidden then
+            for _, a in ipairs(h.actors) do pcall(function() a:SetActorHiddenInGame(true) end) end
+            h.hidden = true
+        end
+        return
+    end
+    if not h then
+        if want.failedVer == want.ver then return end   -- nothing of this item could be shown; don't retry every frame
+        h ={ ver = want.ver, actors = {}, parts = {} }
+        local names = {}
+        for i = 1, want.n do
+            local part = want.parts[i]
+            local okM, a = pcall(meshPartActor, part)
+            if not okM then log("held item part failed: " .. tostring(a)) a = nil end
+            if a then
+                h.actors[#h.actors + 1] = a
+                h.parts[#h.parts + 1] = part
+                names[#names + 1] = part.path:match("([^/%.]+)$") or part.path
+            elseif want.missingLogged ~= part.path then
+                want.missingLogged = part.path
+                log("held item mesh not found: " .. part.path)
+            end
+        end
+        if #h.actors == 0 then want.failedVer = want.ver return end
+        heldShown[side] = h
+        log("other player holds in " .. side .. " hand: " .. table.concat(names, ", "))
+    end
+    if h.hidden then
+        for _, a in ipairs(h.actors) do pcall(function() a:SetActorHiddenInGame(false) end) end
+        h.hidden = false
+    end
+    local mq, ms = { qx, qy, qz, qw }, want.ms or 1
+    for i, a in ipairs(h.actors) do
+        local part = h.parts[i]
+        local ox, oy, oz = qv(mq, part.x * ms, part.y * ms, part.z * ms)
+        local q = qmul(mq, part.q)
+        local p, yw, r = quatToRot(q[1], q[2], q[3], q[4])
+        a:K2_SetActorLocationAndRotation({ X = x + ox, Y = y + oy, Z = z + oz }, { Pitch = p, Yaw = yw, Roll = r }, false, {}, true)
+        if part.appliedScale ~= part.s * ms then
+            part.appliedScale = part.s * ms
+            a:SetActorScale3D({ X = part.appliedScale, Y = part.appliedScale, Z = part.appliedScale })
+        end
+    end
 end
 
 local function half_default()
     local h = 90
-    pcall(function() h = puppet.CapsuleComponent:GetScaledCapsuleHalfHeight() end)
+    pcall(function() h = pup.cap:GetScaledCapsuleHalfHeight() end)
     return h
 end
 
--- v: head(1-7) left(8-14) right(15-21) body(22-28)
+local function worldTime()
+    local ok, t = pcall(function() return UEHelpers.GetGameplayStatics():GetTimeSeconds(getWorld()) end)
+    return ok and t or nil
+end
+
+-- v: head(1-7) left(8-14) right(15-21) body(22-28) heldL(29-35) heldR(36-42) flags(43)
 local function updatePuppet(v)
     if puppetFailed then return false end
     if not valid(puppet) then
-        if puppet ~= nil then log("remote player body disappeared (destroyed by the game?) - respawning") puppet = nil end
+        if puppet ~= nil then log("remote player body disappeared (destroyed by the game?) - respawning") puppet, pup = nil, nil end
         if puppetDead then return true end
-        local ok, a = pcall(spawnPuppet, v[22], v[23], v[24] + 90, select(2, quatToRot(v[25], v[26], v[27], v[28])))
+        local headYaw = select(2, quatToRot(v[4], v[5], v[6], v[7]))
+        local ok, a, ctrl = pcall(spawnPuppet, v[22], v[23], v[24] + 90, headYaw)
         if not ok or not a then
             log("could not spawn the remote player body (" .. tostring(a) .. "), using simple shapes")
             puppetFailed = true
             return false
         end
         puppet = a
-        log("remote player body spawned: " .. a:GetFullName())
+        local okB, P = pcall(setupBody, a)
+        if not okB then log("body setup failed: " .. tostring(P)) destroyPuppet() puppetFailed = true return false end
+        pup = P
+        pup.bodyYaw = headYaw
+        pup.ctrl = ctrl
+        if ctrl then
+            -- "looking direction" mode: the body faces where the player looks and walking sideways or
+            -- backwards plays strafe / backpedal steps instead of turning to run the other way
+            pcall(function() a:BPI_Set_RotationMode(1) end)
+            pcall(function() a.DesiredRotationMode = 1 a.RotationMode = 1 end)
+        end
+        pcall(function() pup.maxAccel = pup.cm.MaxAcceleration end)
+        copyBodyMaterials(pup)
+        log("remote player body spawned: " .. a:GetFullName() .. (pup.pose and " (full-body IK)" or "") .. (ctrl and " (look control)" or " (no look control)"))
     end
     if puppetDead then return true end
-    -- Hit reactions can knock the body into ragdoll. Its owner is still alive, so get it back up
-    -- (the game's own get-up via RagdollEnd keeps the wounds); force it if that does not work.
-    local okS, sim = pcall(function()
-        return puppet.Mesh:IsSimulatingPhysics(FName("Pelvis")) or puppet.Mesh:IsSimulatingPhysics(FName("None"))
-    end)
-    if not okS and frameNo % 900 == 0 then log("ragdoll check failed: " .. tostring(sim)) end
+    local P = pup
+    local flags = math.floor(v[43] or 0)
+
+    -- Never fall over / never be dragged while the owner is alive: any ragdoll (hit reaction,
+    -- someone grabbing the body) is undone the same frame.
+    local okS, sim = pcall(function() return P.mesh:IsSimulatingPhysics(FName("Pelvis")) end)
     if okS and sim then
-        puppetDownSince = puppetDownSince or frameNo
-        local down = frameNo - puppetDownSince
-        if down == 60 then
-            log("remote body knocked down - getting it back up")
-            local okE, errE = pcall(function() puppet:RagdollEnd() end)
-            if not okE then log("RagdollEnd failed: " .. tostring(errE)) end
-        end
-        if down == 240 then
-            log("remote body stayed down - resetting its physics")
-            pcall(function()
-                puppet.Mesh:SetSimulatePhysics(false)
-                puppet.Mesh:K2_AttachToComponent(puppet.CapsuleComponent, FName("None"), 2, 2, 2, true)
-                puppet.Mesh:K2_SetRelativeLocationAndRotation({ X = 0, Y = 0, Z = -half_default() }, { Pitch = 0, Yaw = -90, Roll = 0 }, false, {}, true)
-            end)
-        end
-        if down < 240 then return true end  -- leave the physics alone while it falls / gets up
-    else
-        puppetDownSince = nil
-    end
-    local half = 90
-    pcall(function() half = puppet.CapsuleComponent:GetScaledCapsuleHalfHeight() end)
-    local yaw = select(2, quatToRot(v[25], v[26], v[27], v[28]))
-    -- keep the NPC's head under the real head: the head sits ~10 cm in front of the capsule centre
-    local fx, fy = math.cos(yaw * DEG), math.sin(yaw * DEG)
-    local x, y, z = v[1] - fx * 10, v[2] - fy * 10, v[24] + half
-    puppet:K2_SetActorLocationAndRotation({ X = x, Y = y, Z = z }, { Pitch = 0, Yaw = yaw, Roll = 0 }, false, {}, true)
-    -- drive the walk/idle animation with the real movement speed
-    if puppetLast then
-        local vx, vy = (x - puppetLast[1]) * 90, (y - puppetLast[2]) * 90
-        pcall(function() puppet.CharacterMovement.Velocity = { X = vx, Y = vy, Z = 0 } end)
-    end
-    puppetLast = { x, y }
-    -- Gun only when they hold something; relaxed stance (ALS overlay 0) otherwise.
-    local flags = math.floor(v[29] or 0)
-    local armed = (flags & 12) ~= 0
-    local anim = nil
-    pcall(function() anim = puppet.Mesh:GetAnimInstance() end)
-    if puppet.bttArmed ~= armed then
-        puppet.bttArmed = armed
-        pcall(function() puppet.StaticMesh:SetVisibility(armed, true) end)
-        pcall(function() puppet.Slidemesh:SetVisibility(false, true) end)
-        pcall(function() anim.OverlayState = armed and 7 or 0 end)
-    end
-    -- Head: look exactly where the real headset looks (turn + up/down) via the rig's look-at.
-    pcall(function()
-        local fx2, fy2, fz2 = qrot(v[4], v[5], v[6], v[7], 300, 0, 0)
-        -- "Look At Location" is an FTransform in this AnimBP
-        anim["Look At Location"] = { Translation = { X = v[1] + fx2, Y = v[2] + fy2, Z = v[3] + fz2 },
-                                     Rotation = { X = 0, Y = 0, Z = 0, W = 1 }, Scale3D = { X = 1, Y = 1, Z = 1 } }
-        anim.DragonLookAlpha = 1.0
-        -- crouch when the real head is low (ALS stance 1 = crouching)
-        anim.Stance = (v[3] - v[24] < 120) and 1 or 0
-        local hp, hyw = quatToRot(v[4], v[5], v[6], v[7])
-        anim.AimingRotation = { Pitch = hp, Yaw = hyw, Roll = 0 }
-    end)
-    if selfTest ~= "" and frameNo % 450 == 0 then
-        local okC, errC = pcall(function()
-            local parts = {}
-            local hb = puppet.Mesh:GetSocketLocation(FName("head"))
-            parts[#parts + 1] = string.format("remote head Z %.0f, body head bone Z %.0f (diff %.0f), body actor Z %.0f, floor %.0f",
-                v[3], hb.Z, hb.Z - v[3], puppet:K2_GetActorLocation().Z, v[24])
-            pcall(function() parts[#parts + 1] = "gun visible " .. tostring(puppet.StaticMesh:IsVisible()) end)
-            pcall(function() parts[#parts + 1] = "overlay " .. tostring(anim.OverlayState) end)
-            pcall(function() parts[#parts + 1] = "look alpha " .. tostring(anim.DragonLookAlpha) end)
-            local okL, la = pcall(function() local l = anim["Look At Location"].Translation return string.format("(%.0f,%.0f,%.0f)", l.X, l.Y, l.Z) end)
-            pcall(function()
-                local hd = puppet.Mesh:GetSocketLocation(FName("head"))
-                local fx3, fy3, fz3 = qrot(v[4], v[5], v[6], v[7], 300, 0, 0)
-                parts[#parts + 1] = string.format("wanted look (%.0f,%.0f,%.0f) stance %s", v[1] + fx3, v[2] + fy3, v[3] + fz3, tostring(anim.Stance))
-            end)
-            parts[#parts + 1] = "look-at " .. tostring(la)
-            log("body check: " .. table.concat(parts, ", "))
+        pcall(function()
+            P.mesh:SetSimulatePhysics(false)
+            P.mesh:K2_AttachToComponent(P.cap, FName("None"), 2, 2, 2, true)
+            P.mesh:K2_SetRelativeLocationAndRotation(P.relLoc, P.relRot, false, {}, true)
         end)
-        if not okC then log("body check failed: " .. tostring(errC)) end
     end
-    -- hands: the NPC rig has IK targets for both hands
-    pcall(function()
-        local lp, ly, lr = quatToRot(v[11], v[12], v[13], v[14])
-        local rp, ry, rr = quatToRot(v[18], v[19], v[20], v[21])
-        puppet.ik_hand_l:K2_SetWorldLocationAndRotation({ X = v[8], Y = v[9], Z = v[10] }, { Pitch = lp, Yaw = ly, Roll = lr }, false, {}, true)
-        puppet.ik_hand_r:K2_SetWorldLocationAndRotation({ X = v[15], Y = v[16], Z = v[17] }, { Pitch = rp, Yaw = ry, Roll = rr }, false, {}, true)
-    end)
+
+    local headPitch, headYaw = quatToRot(v[4], v[5], v[6], v[7])
+    local now = worldTime() or 0
+    local dt = P.lastT and math.max(1e-3, math.min(0.2, now - P.lastT)) or 1 / 90
+    P.lastT = now
+    local speed = math.sqrt((P.velX or 0) ^ 2 + (P.velY or 0) ^ 2)
+    local setRot = false
+    if P.ctrl and valid(P.ctrl) then
+        -- The game's own animation turns the body: when standing it steps round after the head
+        -- (turn in place), when moving it faces the look direction and strafes / backpedals.
+        pcall(function() P.ctrl:SetControlRotation({ Pitch = headPitch, Yaw = headYaw, Roll = 0 }) end)
+        local ry = puppet:K2_GetActorRotation().Yaw
+        -- safety net: never leave the body facing far away from the head for long
+        local off = normAxis(headYaw - ry)
+        P.farFrames = math.abs(off) > 110 and (P.farFrames or 0) + 1 or 0
+        if P.farFrames > 60 then ry = normAxis(ry + off * math.min(1, dt * 5)) setRot = true end
+        P.bodyYaw = ry
+    else
+        -- fallback without a controller: body yaw follows the head with a 50-degree dead zone
+        local diff = normAxis(headYaw - P.bodyYaw)
+        if math.abs(diff) > 50 then P.bodyYaw = normAxis(headYaw - (diff > 0 and 50 or -50)) end
+        if speed > 40 then P.bodyYaw = normAxis(P.bodyYaw + diff * math.min(1, dt * 4)) end
+        setRot = true
+    end
+    local by = P.bodyYaw * DEG
+    local half = P.half or half_default()
+    P.half = half
+    local x, y, z = v[1] - math.cos(by) * 10, v[2] - math.sin(by) * 10, v[24] + half
+    if setRot then
+        puppet:K2_SetActorLocationAndRotation({ X = x, Y = y, Z = z }, { Pitch = 0, Yaw = P.bodyYaw, Roll = 0 }, false, {}, true)
+    else
+        puppet:K2_SetActorLocation({ X = x, Y = y, Z = z }, false, {}, true)
+    end
+
+    -- Walk animation speed from the real movement over real time (v0.2 assumed 90 fps -> it
+    -- looked like sprinting). Small movements (leaning, VR room-scale shuffles) don't walk.
+    -- The body's own position shifts when it turns, so speed comes from the streamed position.
+    if P.lastX then
+        local vx, vy = (v[22] - P.lastX) / dt, (v[23] - P.lastY) / dt
+        P.velX = (P.velX or 0) * 0.85 + vx * 0.15
+        P.velY = (P.velY or 0) * 0.85 + vy * 0.15
+        local sp = math.sqrt(P.velX ^ 2 + P.velY ^ 2)
+        local wx, wy = P.velX, P.velY
+        if sp < 25 then wx, wy, sp = 0, 0, 0 end
+        pcall(function() P.cm.Velocity = { X = wx, Y = wy, Z = 0 } end)
+        -- "has movement input": without it the animation slides in the idle pose below 1.5 m/s
+        pcall(function()
+            local acc = P.maxAccel or 1500
+            if sp > 0 then P.cm.Acceleration = { X = wx / sp * acc, Y = wy / sp * acc, Z = 0 }
+            else P.cm.Acceleration = { X = 0, Y = 0, Z = 0 } end
+        end)
+    end
+    P.lastX, P.lastY = v[22], v[23]
+    syncMovementBase(puppet, P.cm)
+    local crouch = (v[3] - v[24] < 120) and 1 or 0                         -- crouch when the real head is low
+    if crouch ~= P.crouch then
+        P.crouch = crouch
+        pcall(function() puppet.DesiredStance = crouch puppet.Stance = crouch end)
+        pcall(function() P.anim.Stance = crouch end)
+    end
+
+    -- Upper body: exact head direction + arms reaching each controller.
+    if P.pose then
+        local okI, errI = pcall(function()
+            P.pose:CopyPoseFromSkeletalComponent(P.mesh)
+            solveHead(P, { v[4], v[5], v[6], v[7] }, P.bodyYaw)
+            if (flags & 1) ~= 0 then solveArm(P, "l", v[8], v[9], v[10], { v[11], v[12], v[13], v[14] }, P.bodyYaw) end
+            if (flags & 2) ~= 0 then solveArm(P, "r", v[15], v[16], v[17], { v[18], v[19], v[20], v[21] }, P.bodyYaw) end
+        end)
+        if not okI then
+            P.ikErrors = (P.ikErrors or 0) + 1
+            if P.ikErrors == 1 or P.ikErrors % 600 == 0 then log("body IK error: " .. tostring(errI)) end
+        end
+        if frameNo % 30 == 0 then copyBodyMaterials(P) end
+        if frameNo % 60 == 0 and P.hideMesh then pcall(P.hideMesh) end   -- the NPC's own logic may re-show it
+        if selfTest ~= "" and frameNo % 450 == 0 then
+            pcall(function()
+                local names = {}
+                for _, c in ipairs(P.parts) do names[#names + 1] = c:GetFName():ToString() .. (c:IsVisible() and "" or "(hidden)") end
+                log("body parts following IK: " .. table.concat(names, ", ") .. " | NPC mesh visible: " .. tostring(P.mesh:IsVisible()))
+            end)
+        end
+    else
+        -- fallback (no poseable mesh): the rig's own look-at
+        pcall(function()
+            local fx2, fy2, fz2 = qrot(v[4], v[5], v[6], v[7], 300, 0, 0)
+            P.anim["Look At Location"] = { Translation = { X = v[1] + fx2, Y = v[2] + fy2, Z = v[3] + fz2 },
+                                           Rotation = { X = 0, Y = 0, Z = 0, W = 1 }, Scale3D = { X = 1, Y = 1, Z = 1 } }
+            P.anim.DragonLookAlpha = 1.0
+        end)
+    end
+
+    -- held items (gun / magazine / melee) exactly where they are in the other player's hands
+    local okHL, eHL = pcall(updateHeldItem, "L", (flags & 4) ~= 0, v[29], v[30], v[31], v[32], v[33], v[34], v[35])
+    local okHR, eHR = pcall(updateHeldItem, "R", (flags & 8) ~= 0, v[36], v[37], v[38], v[39], v[40], v[41], v[42])
+    if (not okHL or not okHR) and frameNo % 300 == 0 then log("held item display error: " .. tostring(eHL) .. " / " .. tostring(eHR)) end
+    if selfTest ~= "" and frameNo % 450 == 0 then
+        log(string.format("held debug: flags %d, remote R parts %d/%d", flags, #remoteHeld.R.parts, remoteHeld.R.n))
+    end
+    local okL, eL = pcall(EX.updateRemoteLights, v)
+    if not okL and frameNo % 300 == 0 then log("remote lights error: " .. tostring(eL)) end
+
+    if selfTest ~= "" and frameNo % 450 == 0 and P.pose then
+        pcall(function()
+            local hb = boneT(P.pose, "Head")
+            local lh = boneT(P.pose, "hand_l")
+            local rh = boneT(P.pose, "hand_r")
+            if heldShown.R and valid(heldShown.R.actors[1]) then
+                local g = heldShown.R.actors[1]:K2_GetActorLocation()
+                log(string.format("held item R: %.0f cm from the right hand bone, visible %s", math.sqrt(dist2(g.X, g.Y, g.Z, rh[1], rh[2], rh[3])), tostring(not heldShown.R.hidden)))
+            end
+            log(string.format("body check: head bone Z %.0f vs headset %.0f | left hand %.0f cm from controller, right hand %.0f cm | body yaw %.0f head yaw %.0f | speed %.0f",
+                hb[3], v[3], math.sqrt(dist2(lh[1], lh[2], lh[3], v[8], v[9], v[10])), math.sqrt(dist2(rh[1], rh[2], rh[3], v[15], v[16], v[17])),
+                P.bodyYaw, headYaw, speed))
+        end)
+    end
     return true
 end
 
 local function puppetDie()
     if puppetDead then return end
     puppetDead = true
+    destroyHeld()
+    pcall(EX.hideRemoteLights)
     if valid(puppet) then
         log("other player died: ragdolling their body")
+        -- show the real (gore-painted) NPC mesh for the ragdoll
+        pcall(function()
+            if pup and pup.pose then
+                pup.pose:SetVisibility(false, false)
+                for _, n in ipairs(BODY_PARTS) do pcall(function() puppet[n]:SetMasterPoseComponent(pup.mesh, true) end) end
+                pup.mesh:SetVisibility(true, false)
+            end
+        end)
         local ok = pcall(function() puppet:RagdollStart() end)
         if not ok then pcall(function() puppet.Mesh:SetSimulatePhysics(true) end) end
     end
@@ -805,12 +1355,47 @@ local function resetNpcSync()
     npcIdOf, npcActor, mirrorIdOf, mirrorTarget, nextNpcId = {}, {}, {}, {}, 1
 end
 
+-- NPCs are tracked as they are created (NotifyOnNewObject) instead of scanning every object in
+-- the game several times a second (FindAllOf), which was expensive.
+local npcRegistry = {}
+local npcRegistryHooked = false
+local lastRegistryScan = -100000
+local function ensureNpcRegistry()
+    if npcRegistryHooked then return end
+    npcRegistryHooked = true
+    local ok, err = pcall(NotifyOnNewObject, NPC_CLASS, function(obj)
+        npcRegistry[#npcRegistry + 1] = obj
+    end)
+    if not ok then log("NPC tracking hook failed (" .. tostring(err) .. "), using slow scans") end
+end
+local function liveNpcs()
+    -- one fallback scan per map (NPCs that existed before the hook), then the registry only
+    if frameNo - lastRegistryScan > 100000 or (#npcRegistry == 0 and frameNo - lastRegistryScan > 900) then
+        lastRegistryScan = frameNo
+        for _, a in ipairs(FindAllOf("BP_NPC_Man_C") or {}) do npcRegistry[#npcRegistry + 1] = a end
+    end
+    local out, seen, keep = {}, {}, {}
+    for _, a in ipairs(npcRegistry) do
+        if valid(a) then
+            local n = a:GetFullName()
+            if not seen[n] and not n:find("Default__", 1, true) then
+                seen[n] = true
+                keep[#keep + 1] = a
+                out[#out + 1] = { actor = a, name = n }
+            end
+        end
+    end
+    npcRegistry = keep
+    return out
+end
+
+local lastBodySent = {}   -- host: id -> {x,y,z} of the last corpse position sent
+
 local function hostSyncTick()
-    local list = FindAllOf("BP_NPC_Man_C") or {}
     local alive = {}
-    for _, a in ipairs(list) do
-        if valid(a) and not isPuppet(a) then
-            local name = a:GetFullName()
+    for _, e in ipairs(liveNpcs()) do
+        local a, name = e.actor, e.name
+        if not isPuppet(a) then
             local id = npcIdOf[name]
             if not id then
                 id = nextNpcId
@@ -820,61 +1405,100 @@ local function hostSyncTick()
                 installHitHook()
             end
             alive[id] = true
-            local l = a:K2_GetActorLocation()
-            local r = a:K2_GetActorRotation()
-            local vx, vy = 0, 0
-            pcall(function() local v = a:GetVelocity() vx, vy = v.X, v.Y end)
-            local dead = 0
-            pcall(function() if a.Dead then dead = 1 end end)
-            sendGame(string.format("npc %d %.1f %.1f %.1f %.1f %.0f %.0f %d", id, l.X, l.Y, l.Z, r.Yaw, vx, vy, dead))
+            local dead = false
+            pcall(function() dead = a.Dead == true end)
+            if not dead then
+                local l = a:K2_GetActorLocation()
+                local r = a:K2_GetActorRotation()
+                local vx, vy = 0, 0
+                pcall(function() local v = a:GetVelocity() vx, vy = v.X, v.Y end)
+                sendGame(string.format("npc %d %.1f %.1f %.1f %.1f %.0f %.0f 0", id, l.X, l.Y, l.Z, r.Yaw, vx, vy))
+            else
+                -- corpse: stream where the body (pelvis) is while it moves (falling, being dragged)
+                local okP, pl = pcall(function() return a.Mesh:GetSocketLocation(FName("Pelvis")) end)
+                if okP then
+                    local last = lastBodySent[id]
+                    if not last then sendGame(string.format("npc %d %.1f %.1f %.1f 0 0 0 1", id, pl.X, pl.Y, pl.Z)) end
+                    if not last or dist2(last[1], last[2], last[3], pl.X, pl.Y, pl.Z) > 16 then
+                        lastBodySent[id] = { pl.X, pl.Y, pl.Z }
+                        sendGame(string.format("npcbody %d %.1f %.1f %.1f", id, pl.X, pl.Y, pl.Z))
+                    end
+                end
+            end
         end
     end
-    for id, a in pairs(npcActor) do
+    for id, _ in pairs(npcActor) do
         if not alive[id] then
             sendGame("npcgone " .. id)
             npcActor[id] = nil
+            lastBodySent[id] = nil
         end
     end
 end
 
 local function clientSyncTick()
     -- remove NPCs that this game spawned by itself (the host's game decides which NPCs exist)
-    if frameNo % (NPC_SYNC_FRAMES * 3) == 0 then
-        for _, a in ipairs(FindAllOf("BP_NPC_Man_C") or {}) do
-            if valid(a) and not isPuppet(a) and not mirrorIdOf[a:GetFullName()] then
-                pcall(function() a:K2_DestroyActor() end)
+    if frameNo % NPC_SYNC_FRAMES == 0 then
+        for _, e in ipairs(liveNpcs()) do
+            if not isPuppet(e.actor) and not mirrorIdOf[e.name] then
+                pcall(function() e.actor:K2_DestroyActor() end)
             end
         end
     end
     for id, t in pairs(mirrorTarget) do
         local m = npcActor[id]
         if not valid(m) then
-            local ok, a = pcall(spawnPuppet, t.x, t.y, t.z, t.yaw)
+            local ok, a, ctrl = pcall(spawnPuppet, t.x, t.y, t.z, t.yaw)
             if ok and a then
                 m = a
                 npcActor[id] = a
                 mirrorIdOf[a:GetFullName()] = id
+                t.mesh = a.Mesh
+                t.ctrl = ctrl
+                t.cm = a.CharacterMovement
                 pcall(function() a.CapsuleComponent:SetCollisionEnabled(1) end)  -- NPCs block you like normal NPCs
             end
         end
-        if valid(m) and not t.deadApplied then
-            local okS, sim = pcall(function() return m.Mesh:IsSimulatingPhysics(FName("Pelvis")) end)
+        if valid(m) then
+            local mesh = t.mesh
             if t.dead then
-                t.deadApplied = true
-                pcall(function() m:RagdollStart() end)
-            elseif okS and sim then
-                -- knocked down by a hit reaction but alive on the host: get up again (wounds stay)
-                t.downSince = t.downSince or frameNo
-                if frameNo - t.downSince == 60 then pcall(function() m:RagdollEnd() end) end
+                if not t.deadApplied then
+                    t.deadApplied = true
+                    pcall(function() m:RagdollStart() end)
+                end
+                -- corpse follows the host's corpse (pulled by the pelvis, limbs stay physical),
+                -- except while this player drags or has just thrown it
+                if t.bx and not EX.locallyControlled(id) and not EX.remoteGrab[id] then
+                    pcall(function()
+                        local pl = mesh:GetSocketLocation(FName("Pelvis"))
+                        local ex, ey, ez = t.bx - pl.X, t.by - pl.Y, t.bz - pl.Z
+                        if ex * ex + ey * ey + ez * ez > 9 then
+                            mesh:SetPhysicsLinearVelocity({ X = ex * 8, Y = ey * 8, Z = ez * 8 }, false, FName("Pelvis"))
+                        end
+                    end)
+                end
             else
-                t.downSince = nil
-                -- glide toward the host's position (updates arrive ~10x/s)
-                local l = m:K2_GetActorLocation()
-                local k = 0.25
-                local x, y, z = l.X + (t.x - l.X) * k, l.Y + (t.y - l.Y) * k, l.Z + (t.z - l.Z) * k
-                if dist2(l.X, l.Y, l.Z, t.x, t.y, t.z) > 300 * 300 then x, y, z = t.x, t.y, t.z end
-                m:K2_SetActorLocationAndRotation({ X = x, Y = y, Z = z }, { Pitch = 0, Yaw = t.yaw, Roll = 0 }, false, {}, true)
-                pcall(function() m.CharacterMovement.Velocity = { X = t.vx, Y = t.vy, Z = 0 } end)
+                local okS, sim = pcall(function() return mesh:IsSimulatingPhysics(FName("Pelvis")) end)
+                if okS and sim then
+                    -- knocked down on this side but alive on the host: get up again (not while
+                    -- someone is holding it)
+                    if EX.locallyControlled(id) or EX.remoteGrab[id] then
+                        t.downSince = nil
+                    else
+                        t.downSince = t.downSince or frameNo
+                        if frameNo - t.downSince == 30 then pcall(function() m:RagdollEnd() end) end
+                    end
+                else
+                    t.downSince = nil
+                    local l = m:K2_GetActorLocation()
+                    local k = 0.25
+                    local x, y, z = l.X + (t.x - l.X) * k, l.Y + (t.y - l.Y) * k, l.Z + (t.z - l.Z) * k
+                    if dist2(l.X, l.Y, l.Z, t.x, t.y, t.z) > 300 * 300 then x, y, z = t.x, t.y, t.z end
+                    m:K2_SetActorLocationAndRotation({ X = x, Y = y, Z = z }, { Pitch = 0, Yaw = t.yaw, Roll = 0 }, false, {}, true)
+                    pcall(function() m.CharacterMovement.Velocity = { X = t.vx, Y = t.vy, Z = 0 } end)
+                    if t.ctrl and valid(t.ctrl) then pcall(function() t.ctrl:SetControlRotation({ Pitch = 0, Yaw = t.yaw, Roll = 0 }) end) end
+                    if t.cm then syncMovementBase(m, t.cm) end
+                end
             end
         end
     end
@@ -885,12 +1509,22 @@ local function npcSyncTick()
         if syncMap then resetNpcSync() syncMap = nil end
         return
     end
-    if syncMap ~= currentMap then resetNpcSync() syncMap = currentMap end
+    ensureNpcRegistry()
+    if syncMap ~= currentMap then resetNpcSync() lastBodySent = {} syncMap = currentMap lastRegistryScan = -100000 end
     if status.role == "host" then
         if frameNo % NPC_SYNC_FRAMES == 0 then hostSyncTick() end
     else
         clientSyncTick()
     end
+end
+
+-- Hits are sent RELATIVE TO THE BONE that was hit, so the wound/blood appears on the same spot of
+-- the body on both screens even when the two copies of an NPC are not exactly in the same place
+-- (in v0.2 world coordinates were used: blood appeared in mid-air).
+local function boneFrame(mesh, bone)
+    local bl = mesh:GetSocketLocation(FName(bone))
+    local br = mesh:GetSocketRotation(FName(bone))
+    return bl, { rotToQuat(br.Pitch, br.Yaw, br.Roll) }
 end
 
 onNpcHit = function(npc, bone, x, y, z, nx, ny, nz, causer, exitWound)
@@ -899,13 +1533,18 @@ onNpcHit = function(npc, bone, x, y, z, nx, ny, nz, causer, exitWound)
     local id = status.role == "host" and npcIdOf[name] or mirrorIdOf[name]
     if not id then return end
     if status.role == "client" and causer:find("melee", 1, true) then
-        -- same attribution rule as for players: only melee that your hands delivered
         if not (dist2(x, y, z, localLeft[1], localLeft[2], localLeft[3]) < 3600 or dist2(x, y, z, localRight[1], localRight[2], localRight[3]) < 3600) then return end
     end
     local key = "npc" .. id .. "|" .. causer .. "|" .. bone .. "|" .. tostring(exitWound)
     if lastHitFrame[key] and frameNo - lastHitFrame[key] < 20 then return end
     lastHitFrame[key] = frameNo
-    sendGame(string.format("npchit %d %s %.1f %.1f %.1f %.3f %.3f %.3f %s %d", id, bone ~= "" and bone or "-", x, y, z, nx, ny, nz, causer, exitWound and 1 or 0))
+    if bone == "" or bone == "None" then bone = "Pelvis" end
+    local ok, bl, q = pcall(boneFrame, npc.Mesh, bone)
+    if not ok then return end
+    local iq = qconj(q)
+    local ox, oy, oz = qv(iq, x - bl.X, y - bl.Y, z - bl.Z)
+    local lx, ly, lz = qv(iq, nx, ny, nz)
+    sendGame(string.format("npchit %d %s %.2f %.2f %.2f %.3f %.3f %.3f %s %d", id, bone, ox, oy, oz, lx, ly, lz, causer, exitWound and 1 or 0))
 end
 
 local function handleNpcEvent(kind, rest)
@@ -914,28 +1553,319 @@ local function handleNpcEvent(kind, rest)
         id = tonumber(id)
         if not id then return end
         local t = mirrorTarget[id] or {}
-        t.x, t.y, t.z, t.yaw, t.vx, t.vy = tonumber(x), tonumber(y), tonumber(z), tonumber(yaw), tonumber(vx), tonumber(vy)
-        t.dead = dead == "1"
+        if dead == "1" then
+            t.dead = true
+            if not t.x then t.x, t.y, t.z, t.yaw, t.vx, t.vy = tonumber(x), tonumber(y), tonumber(z), 0, 0, 0 end
+        else
+            t.x, t.y, t.z, t.yaw, t.vx, t.vy = tonumber(x), tonumber(y), tonumber(z), tonumber(yaw), tonumber(vx), tonumber(vy)
+            t.dead = false
+        end
         mirrorTarget[id] = t
+    elseif kind == "npcbody" and status.role == "client" then
+        local id, x, y, z = rest:match("^(%d+) (%S+) (%S+) (%S+)")
+        local t = mirrorTarget[tonumber(id or "")]
+        if t then t.bx, t.by, t.bz = tonumber(x), tonumber(y), tonumber(z) end
     elseif kind == "npcgone" and status.role == "client" then
         local id = tonumber(rest)
         if id and valid(npcActor[id]) then pcall(function() npcActor[id]:K2_DestroyActor() end) end
         if id then npcActor[id], mirrorTarget[id] = nil, nil end
     elseif kind == "npchit" then
-        local id, bone, x, y, z, nx, ny, nz, causer, ew = rest:match("^(%d+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%d)")
+        local id, bone, ox, oy, oz, lx, ly, lz, causer, ew = rest:match("^(%d+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%d)")
         local target = npcActor[tonumber(id or "")]
         if not valid(target) then return end
+        local ok, bl, q = pcall(boneFrame, target.Mesh, bone)
+        if not ok then return end
+        local wx, wy, wz = qv(q, tonumber(ox), tonumber(oy), tonumber(oz))
+        local nx, ny, nz = qv(q, tonumber(lx), tonumber(ly), tonumber(lz))
         applyingRemoteHit = true
-        local ok, err = pcall(applyBulletHit, target, bone, tonumber(x), tonumber(y), tonumber(z), tonumber(nx), tonumber(ny), tonumber(nz), causer, ew == "1")
+        local okA, err = pcall(applyBulletHit, target, bone, bl.X + wx, bl.Y + wy, bl.Z + wz, nx, ny, nz, causer, ew == "1")
         applyingRemoteHit = false
-        if not ok then log("replaying NPC hit failed: " .. tostring(err)) end
+        if not okA then log("replaying NPC hit failed: " .. tostring(err)) end
+    end
+end
+
+------------------------------------------------------------------------------- torch / night vision
+-- The player pawn (WendigoVrChar) has a HeadLamp spot light, a NightVisionLight and a VisionMode.
+-- Their state is sent when it changes; the other game draws a matching head lamp on the body
+-- (same light settings, copied from its own player's lamp) and a faint green glow for night vision.
+function EX.readVision()
+    local pawn = getPawn()
+    if not pawn then return end
+    local lamp, nv, mode = 0, 0, 0
+    pcall(function() mode = tonumber(pawn.VisionMode) or 0 end)
+    pcall(function() local l = pawn.HeadLamp if valid(l) and l:IsVisible() and l.Intensity > 0 then lamp = 1 end end)
+    pcall(function() local l = pawn.NightVisionLight if valid(l) and l:IsVisible() and l.Intensity > 0 then nv = 1 end end)
+    local s = string.format("vision %d %d %d", lamp, nv, mode)
+    if s ~= EX.visSent or frameNo - (EX.visAt or 0) > 900 then
+        if s ~= EX.visSent then log(string.format("my head lamp %s, night vision %s (vision mode %d)", lamp == 1 and "on" or "off", nv == 1 and "on" or "off", mode)) end
+        EX.visSent, EX.visAt = s, frameNo
+        sendGame(s)
+    end
+end
+
+local function lightActor(classPath, prop)
+    local a = spawnActor(classPath)
+    if not a then return nil, nil end
+    local c = a[prop]
+    pcall(function() c:SetMobility(2) end)
+    return a, c
+end
+
+function EX.hideRemoteLights()
+    for _, k in ipairs({ "lampActor", "nvActor" }) do
+        if valid(EX[k]) then pcall(function() EX[k]:SetActorHiddenInGame(true) end) end
+    end
+    EX.lampShown, EX.nvShown = false, false
+end
+
+-- v: the remote pose (head = v[1..7])
+function EX.updateRemoteLights(v)
+    local hq = { v[4], v[5], v[6], v[7] }
+    local p, yw, r = quatToRot(hq[1], hq[2], hq[3], hq[4])
+    local wantLamp = EX.remoteVis.lamp == 1 and not puppetDead
+    if wantLamp and not valid(EX.lampActor) then
+        local a, c = lightActor("/Script/Engine.SpotLight", "SpotLightComponent")
+        if a then
+            EX.lampActor = a
+            local src = nil
+            pcall(function() local pw = getPawn() if pw then src = pw.HeadLamp end end)
+            if valid(src) then
+                pcall(function() c.IntensityUnits = src.IntensityUnits end)
+                pcall(function() c:SetIntensity(src.Intensity) end)
+                pcall(function() c:SetOuterConeAngle(src.OuterConeAngle) end)
+                pcall(function() c:SetInnerConeAngle(src.InnerConeAngle) end)
+                pcall(function() c:SetAttenuationRadius(src.AttenuationRadius) end)
+                pcall(function() local lc = src.LightColor c:SetLightColor({ R = lc.R / 255, G = lc.G / 255, B = lc.B / 255, A = 1 }, true) end)
+                pcall(function() c:SetCastShadows(src.CastShadows) end)
+            else
+                pcall(function() c:SetIntensity(5000) c:SetOuterConeAngle(28) c:SetInnerConeAngle(12) c:SetAttenuationRadius(2500) end)
+            end
+            log("other player's head lamp created")
+        end
+    end
+    if valid(EX.lampActor) then
+        if wantLamp ~= EX.lampShown then
+            EX.lampShown = wantLamp
+            pcall(function() EX.lampActor:SetActorHiddenInGame(not wantLamp) end)
+        end
+        if wantLamp then
+            local ox, oy, oz = qv(hq, 10, 0, 9)          -- on the forehead
+            EX.lampActor:K2_SetActorLocationAndRotation({ X = v[1] + ox, Y = v[2] + oy, Z = v[3] + oz }, { Pitch = p, Yaw = yw, Roll = r }, false, {}, true)
+        end
+    end
+    local wantNv = EX.remoteVis.nv == 1 and not puppetDead
+    if wantNv and not valid(EX.nvActor) then
+        local a, c = lightActor("/Script/Engine.PointLight", "PointLightComponent")
+        if a then
+            EX.nvActor = a
+            pcall(function() c:SetIntensity(30) c:SetAttenuationRadius(18) c:SetCastShadows(false) end)
+            pcall(function() c:SetLightColor({ R = 0.25, G = 1.0, B = 0.3, A = 1 }, true) end)
+        end
+    end
+    if valid(EX.nvActor) then
+        if wantNv ~= EX.nvShown then
+            EX.nvShown = wantNv
+            pcall(function() EX.nvActor:SetActorHiddenInGame(not wantNv) end)
+        end
+        if wantNv then
+            local ox, oy, oz = qv(hq, 12, 0, 2)          -- just in front of the eyes
+            EX.nvActor:K2_SetActorLocation({ X = v[1] + ox, Y = v[2] + oy, Z = v[3] + oz }, false, {}, true)
+        end
+    end
+end
+
+------------------------------------------------------------------------------- grabbing and throwing
+-- NPC bodies: the player who drags a body streams where the grabbed bone is; the other game pulls
+-- the same bone of its copy there (physics), and the release velocity is replayed so a throw lands
+-- in the same place. While you drag a body, your game ignores the other side's corrections for it.
+local function npcSyncIdOf(npc)
+    local name = npc:GetFullName()
+    if status.role == "host" then return npcIdOf[name] end
+    return mirrorIdOf[name]
+end
+
+function EX.grabTick()
+    local pawn = getPawn()
+    if not pawn then return end
+    local now = {}
+    for _, side in ipairs({ "R", "L" }) do
+        local npc = nil
+        pcall(function() npc = pawn["GrippedNpc" .. side] end)
+        if valid(npc) and not isPuppet(npc) then
+            local id = npcSyncIdOf(npc)
+            if id then
+                local bone = "Pelvis"
+                pcall(function() local b = npc.GrippedBoneName:ToString() if b ~= "" and b ~= "None" then bone = b end end)
+                now[id] = { npc = npc, bone = bone }
+            end
+        end
+    end
+    for id, g in pairs(now) do
+        if not EX.grab[id] then log(string.format("grabbed NPC %d by the %s", id, g.bone)) end
+        if frameNo % 3 == 0 then
+            pcall(function()
+                local l = g.npc.Mesh:GetSocketLocation(FName(g.bone))
+                sendGame(string.format("npcdrag %d %s %.1f %.1f %.1f", id, g.bone, l.X, l.Y, l.Z))
+            end)
+        end
+    end
+    for id, g in pairs(EX.grab) do
+        if not now[id] then
+            local vx, vy, vz = 0, 0, 0
+            pcall(function() local vel = g.npc.Mesh:GetPhysicsLinearVelocity(FName(g.bone)) vx, vy, vz = vel.X, vel.Y, vel.Z end)
+            sendGame(string.format("npcdrop %d %s %.0f %.0f %.0f", id, g.bone, vx, vy, vz))
+            EX.dropAt[id] = frameNo
+            log(string.format("released NPC %d (%.0f cm/s)", id, math.sqrt(vx * vx + vy * vy + vz * vz)))
+        end
+    end
+    EX.grab = now
+end
+
+-- true while this game must not pull NPC `id` back to the other side's position
+function EX.locallyControlled(id)
+    return EX.grab[id] ~= nil or (EX.dropAt[id] ~= nil and frameNo - EX.dropAt[id] < 90)
+end
+
+function EX.remoteGrabTick()
+    for id, g in pairs(EX.remoteGrab) do
+        local a = npcActor[id]
+        if frameNo - g.at > 90 or not valid(a) then
+            EX.remoteGrab[id] = nil
+        elseif not EX.grab[id] then
+            pcall(function()
+                local mesh = a.Mesh
+                local b = FName(g.bone)
+                if not mesh:IsSimulatingPhysics(b) and not g.ragdolled then
+                    g.ragdolled = true
+                    a:RagdollStart()                 -- grabbing a body turns it into a ragdoll
+                end
+                local l = mesh:GetSocketLocation(b)
+                local ex, ey, ez = g.x - l.X, g.y - l.Y, g.z - l.Z
+                mesh:SetPhysicsLinearVelocity({ X = ex * 10, Y = ey * 10, Z = ez * 10 }, false, b)
+            end)
+        end
+    end
+end
+
+------------------------------------------------------------------------------- props (level objects)
+-- Map objects exist in both games under the same name, so a grabbed prop (bottle, chair, box, a gun
+-- lying in the level...) is moved in the other game too: streamed while held and while it flies
+-- after a throw, until it comes to rest.
+function EX.propTick()
+    local held = {}
+    for _, side in ipairs({ "L", "R" }) do
+        local a = heldState[side].actor
+        if valid(a) and not a:IsA(cls(NPC_CLASS_PATH)) and EX.isLevel(a) then held[objPath(a)] = a end
+    end
+    for path, a in pairs(held) do
+        if not EX.props[path] then log("holding a map object: " .. path) end
+        EX.props[path] = { actor = a, held = true, still = 0, since = frameNo }
+    end
+    for path, s in pairs(EX.props) do
+        if not held[path] then
+            if s.held then s.held, s.since = false, frameNo end
+            local done = not valid(s.actor)
+            if not done and frameNo % 3 == 0 then
+                local vx, vy, vz = 0, 0, 0
+                pcall(function() local v = s.actor:GetVelocity() vx, vy, vz = v.X, v.Y, v.Z end)
+                s.still = (vx * vx + vy * vy + vz * vz < 9) and s.still + 1 or 0
+                if s.still > 10 or frameNo - s.since > 600 then done = true end
+            end
+            if done then
+                if valid(s.actor) then EX.sendProp(path, s.actor) end   -- final resting place
+                EX.props[path] = nil
+            end
+        end
+    end
+    if frameNo % 3 == 0 then
+        for path, s in pairs(EX.props) do if valid(s.actor) then EX.sendProp(path, s.actor) end end
+    end
+end
+
+function EX.sendProp(path, a)
+    pcall(function()
+        local l = a:K2_GetActorLocation()
+        local r = a:K2_GetActorRotation()
+        local qx, qy, qz, qw = rotToQuat(r.Pitch, r.Yaw, r.Roll)
+        local vx, vy, vz = 0, 0, 0
+        pcall(function() local v = a:GetVelocity() vx, vy, vz = v.X, v.Y, v.Z end)
+        sendGame(string.format("prop %s %.1f %.1f %.1f %.4f %.4f %.4f %.4f %.0f %.0f %.0f", path, l.X, l.Y, l.Z, qx, qy, qz, qw, vx, vy, vz))
+    end)
+end
+
+function EX.onProp(path, x, y, z, qx, qy, qz, qw, vx, vy, vz)
+    if EX.props[path] then return end                 -- I'm holding / throwing it myself
+    local a = EX.propCache[path]
+    if not valid(a) then
+        a = StaticFindObject(path)
+        if not valid(a) or not EX.isLevel(a) then
+            if EX.missingProp ~= path then EX.missingProp = path log("map object not found here: " .. path) end
+            return
+        end
+        EX.propCache[path] = a
+    end
+    local p, yw, r = quatToRot(qx, qy, qz, qw)
+    pcall(function()
+        a:K2_SetActorLocationAndRotation({ X = x, Y = y, Z = z }, { Pitch = p, Yaw = yw, Roll = r }, false, {}, true)
+        local root = a:K2_GetRootComponent()
+        root:SetPhysicsLinearVelocity({ X = vx, Y = vy, Z = vz }, false, FName("None"))
+    end)
+end
+
+function EX.tick()
+    if status.state ~= "Connected" then return end
+    if frameNo % 15 == 0 then pcall(EX.readVision) end
+    if not syncActive() then return end
+    local ok, err = pcall(EX.grabTick)
+    if not ok and frameNo % 300 == 0 then log("grab sync error: " .. tostring(err)) end
+    pcall(EX.remoteGrabTick)
+    ok, err = pcall(EX.propTick)
+    if not ok and frameNo % 300 == 0 then log("prop sync error: " .. tostring(err)) end
+end
+
+function EX.handle(kind, rest)
+    if kind == "vision" then
+        local lamp, nv = rest:match("^(%d) (%d)")
+        if lamp then
+            if tonumber(lamp) ~= EX.remoteVis.lamp or tonumber(nv) ~= EX.remoteVis.nv then
+                log(string.format("other player's head lamp %s, night vision %s", lamp == "1" and "on" or "off", nv == "1" and "on" or "off"))
+            end
+            EX.remoteVis.lamp, EX.remoteVis.nv = tonumber(lamp), tonumber(nv)
+        end
+    elseif kind == "npcdrag" then
+        local id, bone, x, y, z = rest:match("^(%d+) (%S+) (%S+) (%S+) (%S+)")
+        id = tonumber(id or "")
+        if id then
+            local g = EX.remoteGrab[id] or {}
+            g.bone, g.x, g.y, g.z, g.at = bone, tonumber(x), tonumber(y), tonumber(z), frameNo
+            EX.remoteGrab[id] = g
+        end
+    elseif kind == "npcdrop" then
+        local id, bone, vx, vy, vz = rest:match("^(%d+) (%S+) (%S+) (%S+) (%S+)")
+        id = tonumber(id or "")
+        if id then
+            EX.remoteGrab[id] = nil
+            local a = npcActor[id]
+            if valid(a) and not EX.grab[id] then
+                pcall(function()
+                    local v = { X = tonumber(vx), Y = tonumber(vy), Z = tonumber(vz) }
+                    a.Mesh:SetPhysicsLinearVelocity(v, false, FName(bone))
+                    a.Mesh:SetPhysicsLinearVelocity(v, false, FName("Pelvis"))
+                end)
+            end
+        end
+    elseif kind == "prop" then
+        local path, x, y, z, qx, qy, qz, qw, vx, vy, vz = rest:match("^(%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+)")
+        if path then
+            EX.onProp(path, tonumber(x), tonumber(y), tonumber(z), tonumber(qx), tonumber(qy), tonumber(qz), tonumber(qw), tonumber(vx), tonumber(vy), tonumber(vz))
+        end
     end
 end
 
 -- my own life, reported to the other player
 local myDeadReported = false
 local function watchMyHealth()
-    local pawn = UEHelpers.GetPlayer()
+    local pawn = getPawn()
     if not valid(pawn) then return end
     local okH, hp = pcall(function() return pawn.PlayerHealth end)
     if not okH or type(hp) ~= "number" then return end
@@ -953,7 +1883,7 @@ local function handleGame(line)
     if kind == "hit" then
         local frac, bone, causer = rest:match("^(%S+) (%S+) (%S+)")
         frac = tonumber(frac) or 0
-        local pawn = UEHelpers.GetPlayer()
+        local pawn = getPawn()
         if valid(pawn) and frac > 0 then
             local maxHp = 100
             pcall(function() maxHp = pawn.playerhealthmax end)
@@ -977,8 +1907,24 @@ local function handleGame(line)
         showNote((status.peer or "The other player") .. " died")
     elseif kind == "alive" then
         puppetRespawn()
-    elseif kind == "npc" or kind == "npcgone" or kind == "npchit" then
+    elseif kind == "held" then
+        -- held <L|R> <part count> <scale of the gripped component>
+        local side, n, ms = rest:match("^([LR]) (%d+) (%S+)")
+        if side then
+            local old = remoteHeld[side]
+            remoteHeld[side] = { ver = old.ver + 1, n = tonumber(n), ms = tonumber(ms) or 1, parts = {} }
+        end
+    elseif kind == "heldpart" then
+        -- heldpart <L|R> <i> <mesh path> <K|S> <rel x y z> <rel quat x y z w> <scale>
+        local side, i, path, k, a, b, c, d, e, f, g, s = rest:match("^([LR]) (%d+) (%S+) ([KS]) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+)")
+        if side then
+            remoteHeld[side].parts[tonumber(i)] = { path = path, kind = k, x = tonumber(a), y = tonumber(b), z = tonumber(c),
+                q = { tonumber(d), tonumber(e), tonumber(f), tonumber(g) }, s = tonumber(s) or 1 }
+        end
+    elseif kind == "npc" or kind == "npcgone" or kind == "npchit" or kind == "npcbody" then
         handleNpcEvent(kind, rest)
+    elseif kind == "vision" or kind == "npcdrag" or kind == "npcdrop" or kind == "prop" then
+        EX.handle(kind, rest)
     end
 end
 
@@ -1001,10 +1947,12 @@ local function parseReply(reply)
             if line == "RP -" then
                 hideAvatar()
                 if valid(puppet) and not puppetDead then destroyPuppet() end
+                destroyHeld()
+                pcall(EX.hideRemoteLights)
             else
                 local v = {}
                 for num in line:sub(4):gmatch("%S+") do v[#v + 1] = tonumber(num) end
-                if #v >= 28 then
+                if #v >= 43 then
                     local okP, body = pcall(updatePuppet, v)
                     if not okP then
                         log("body update failed: " .. tostring(body) .. " - falling back to simple shapes")
@@ -1052,13 +2000,8 @@ local function frame()
     end
     local okPose, poseLine = pcall(readLocalPose)
     if okPose and poseLine then req[#req + 1] = poseLine end
-    pcall(function()
-        local pc = UEHelpers.GetPlayerController()
-        if valid(pc) and valid(pc.PlayerCameraManager) then
-            local r = pc.PlayerCameraManager:GetCameraRotation()
-            headQuat[1], headQuat[2], headQuat[3], headQuat[4] = rotToQuat(r.Pitch, r.Yaw, r.Roll)
-        end
-    end)
+    for i = 1, #heldEvents do req[#req + 1] = "X " .. heldEvents[i] end
+    heldEvents = {}
     if frameNo % MAP_POLL_FRAMES == 0 or currentMap == nil then
         local okM, m = pcall(currentMapPath)
         if okM and m and m ~= currentMap then
@@ -1067,7 +2010,8 @@ local function frame()
             avatarDisabled = false   -- try again on the new map
             destroyAvatar()
             note = nil
-            puppet, puppetLast, puppetDead, puppetFailed = nil, nil, false, false  -- old body died with the old map
+            puppet, puppetLast, puppetDead, puppetFailed, pup = nil, nil, false, false, nil  -- old body died with the old map
+            heldShown = { L = nil, R = nil }
         end
         if currentMap then req[#req + 1] = "M " .. currentMap end
     end
@@ -1077,11 +2021,16 @@ local function frame()
     end
     for i = 1, #pendingSounds do req[#req + 1] = pendingSounds[i] end
     pendingSounds = {}
-    pcall(watchMyHealth)
+    if frameNo % 10 == 0 then pcall(watchMyHealth) end
     -- NPC sync (config.ini [Gameplay] NpcSync=1, the default). The simulated player runs no game.
     if not status.simulated and npcSyncEnabled then
         local okN, errN = pcall(npcSyncTick)
         if not okN and frameNo % 300 == 0 then log("NPC sync error: " .. tostring(errN)) end
+    end
+    -- torch / night vision, dragging bodies, thrown props
+    if not status.simulated then
+        local okE, errE = pcall(EX.tick)
+        if not okE and frameNo % 300 == 0 then log("extras sync error: " .. tostring(errE)) end
     end
     -- developer self-test: shoot the other player's body with a point-damage event
     -- developer self-test: go to the Sandbox map by itself (host side of NPC sync)

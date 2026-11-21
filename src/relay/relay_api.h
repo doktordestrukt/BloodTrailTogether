@@ -51,6 +51,8 @@ class RelayApi {
   bool allocate(const AuthToken& tok, int max_connections, const std::string& region, AllocationInfo& out, ApiError& err);
   bool create_join_code(const AuthToken& tok, const std::string& allocation_id, std::string& code, ApiError& err);
   bool join(const AuthToken& tok, const std::string& join_code, AllocationInfo& out, ApiError& err);
+  // GET /v1/regions -> list of {id, description}
+  bool list_regions(const AuthToken& tok, std::vector<std::pair<std::string, std::string>>& out, ApiError& err);
 
   // Exposed for tests: parse an allocation JSON object.
   static bool parse_allocation(const btt::Json& alloc, bool is_join, AllocationInfo& out, std::string& why);

@@ -68,6 +68,8 @@ int main(int argc, char** argv) {
   // --fake-npc (host): pretend the host's game has one NPC walking back and forth 3 m in front of
   // the origin, which dies 40 s after connecting. Exercises the client's NPC mirroring.
   bool fake_npc = false;
+  std::string hold_mesh;  // --hold <skeletal mesh path>: "hold" it in the right hand like a gun
+  bool hold_sent = false;
   double last_npc = 0, connected_at = -1;
   ImpairmentParams imp;
   double seconds = 0;
@@ -86,6 +88,7 @@ int main(int argc, char** argv) {
     else if (a == "--sound") sound_path = next();
     else if (a == "--game") game_line = next();
     else if (a == "--fake-npc") fake_npc = true;
+    else if (a == "--hold") hold_mesh = next();
     else if (arg1.empty()) arg1 = a;
     else arg2 = a;
   }
@@ -98,6 +101,18 @@ int main(int argc, char** argv) {
   Settings s = Settings::from(cfg);
   RelayConfig rc{s.unity_project_id, s.unity_environment, s.relay_region};
 
+  if (mode == "relay-regions") {
+    relay::RelayApi api(s.unity_project_id, s.unity_environment);
+    relay::AuthToken tok;
+    relay::ApiError err;
+    std::vector<std::pair<std::string, std::string>> regs;
+    if (!api.sign_in(tok, err) || !api.list_regions(tok, regs, err)) {
+      printf("error: %s\n", err.message.c_str());
+      return 1;
+    }
+    for (auto& [id, desc] : regs) BTT_INFO("region %s  %s", id.c_str(), desc.c_str());
+    return 0;
+  }
   TransportPtr t;
   Role role = Role::Host;
   if (mode == "relay-host") t = RelayTransport::host(rc);
@@ -126,7 +141,24 @@ int main(int argc, char** argv) {
       printf("\n  JOIN CODE: %s\n\n", printed_code.c_str());
       BTT_INFO("JOIN CODE: %s", printed_code.c_str());
     }
-    ses.set_local_pose(scripted_pose(pattern, now - start));
+    {
+      PoseFrame pf = scripted_pose(pattern, now - start);
+      if (!hold_mesh.empty()) {
+        pf.heldR = pf.right;  // the gun sits in the right hand, pointing where the hand points
+        pf.flags |= 8;
+        if (!hold_sent && ses.state() == SessionState::Connected) {
+          // same lines the game sends: part count, then one line per mesh part (relative transform)
+          NetEvent e;
+          e.type = EventType::Game;
+          e.s1 = "held R 1 1.000";
+          ses.send_event(e);
+          e.s1 = "heldpart R 1 " + hold_mesh + " K 0 0 0 0 0 0 1 1.000";
+          ses.send_event(e);
+          hold_sent = true;
+        }
+      }
+      ses.set_local_pose(pf);
+    }
     if (!sound_path.empty() && ses.state() == SessionState::Connected && now - last_sound > 5.0) {
       last_sound = now;
       NetEvent e;

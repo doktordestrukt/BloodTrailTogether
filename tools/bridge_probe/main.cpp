@@ -72,7 +72,7 @@ int main(int argc, char** argv) {
     double t = (GetTickCount() - start) / 1000.0;
     char pose[512];
     snprintf(pose, sizeof(pose),
-             "P %.2f 0 170 0 0 0 1  %.2f -25 130 0 0 0 1  %.2f 25 %.2f 0 0 0 1  %.2f 0 95 0 0 0 1 3\nM /Game/Maps/Sandbox/Map_Sandbox\n",
+             "P %.2f 0 170 0 0 0 1  %.2f -25 130 0 0 0 1  %.2f 25 %.2f 0 0 0 1  %.2f 0 95 0 0 0 1  0 0 0 0 0 0 1  0 0 0 0 0 0 1 3\nM /Game/Maps/Sandbox/Map_Sandbox\n",
              t * 50.0, t * 50.0 + 30, t * 50.0 + 30, 130 + 20 * std::sin(t * 4), t * 50.0);
     std::string req = pose;
     if (!sound_sent && t > 2.0) {

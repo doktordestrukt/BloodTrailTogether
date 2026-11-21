@@ -11,7 +11,7 @@
 
 namespace btt {
 
-constexpr uint16_t kProtocolVersion = 2;  // 2: body transform in poses, Game events
+constexpr uint16_t kProtocolVersion = 3;  // 3: held-item transforms; 2: body transform, Game events
 
 enum class Role : uint8_t { Host = 1, Client = 2 };
 

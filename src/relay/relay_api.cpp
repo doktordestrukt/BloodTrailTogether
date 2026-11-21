@@ -147,6 +147,21 @@ bool RelayApi::create_join_code(const AuthToken& tok, const std::string& allocat
   return true;
 }
 
+bool RelayApi::list_regions(const AuthToken& tok, std::vector<std::pair<std::string, std::string>>& out, ApiError& err) {
+  auto r = http_request("GET", relay_base + "/v1/regions", {{"Authorization", "Bearer " + tok.id_token}}, "");
+  if (r.status != 200) {
+    err = {describe_error(r, "Listing relay regions"), r.status};
+    return false;
+  }
+  Json j;
+  if (!Json::parse(r.body, j)) {
+    err = {"Region list not understood", r.status};
+    return false;
+  }
+  for (auto& reg : j["data"]["regions"].a) out.push_back({reg["id"].str(), reg["description"].str()});
+  return true;
+}
+
 bool RelayApi::join(const AuthToken& tok, const std::string& join_code, AllocationInfo& out, ApiError& err) {
   auto r = http_request("POST", relay_base + "/v1/join",
                         {{"Content-Type", "application/json"}, {"Authorization", "Bearer " + tok.id_token}},

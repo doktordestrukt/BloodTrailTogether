@@ -147,7 +147,7 @@ static void test_pose_codec() {
   f.flags = 3;
   Writer w;
   write_pose(w, f);
-  CHECK(w.size() == 65);
+  CHECK(w.size() == 97);
   Reader r(w.buf.data(), w.size());
   PoseFrame g = read_pose(r);
   CHECK(std::fabs(g.head.p.x - 123456.7f) < 0.06f && std::fabs(g.head.p.z - 170.3f) < 0.06f && g.flags == 3);

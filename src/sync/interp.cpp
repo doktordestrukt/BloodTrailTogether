@@ -77,6 +77,8 @@ bool PoseInterpolator::sample(double local_now_s, PoseFrame& out) const {
     out.left = extrap_x(prev.f.left, newest.f.left, dab, dt);
     out.right = extrap_x(prev.f.right, newest.f.right, dab, dt);
     out.body = extrap_x(prev.f.body, newest.f.body, dab, dt);
+    out.heldL = extrap_x(prev.f.heldL, newest.f.heldL, dab, dt);
+    out.heldR = extrap_x(prev.f.heldR, newest.f.heldR, dab, dt);
     return true;
   }
   auto it = std::lower_bound(snaps_.begin(), snaps_.end(), render_t, [](const Snap& s, double v) { return s.t < v; });
@@ -89,6 +91,8 @@ bool PoseInterpolator::sample(double local_now_s, PoseFrame& out) const {
   out.left = lerp_x(a.f.left, b.f.left, u);
   out.right = lerp_x(a.f.right, b.f.right, u);
   out.body = lerp_x(a.f.body, b.f.body, u);
+  out.heldL = lerp_x(a.f.heldL, b.f.heldL, u);
+  out.heldR = lerp_x(a.f.heldR, b.f.heldR, u);
   return true;
 }
 

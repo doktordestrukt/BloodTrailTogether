@@ -333,6 +333,9 @@ void NetEngine::sim_tick(double now) {
       f.left = tf(seen.right);
       f.right = tf(seen.left);
       f.body = tf(seen.body);
+      f.heldL = tf(seen.heldR);
+      f.heldR = tf(seen.heldL);
+      f.flags = (uint8_t)((seen.flags & 3) | ((seen.flags & 4) << 1) | ((seen.flags & 8) >> 1));
     } else {
       // Orbit: walk a 2 m circle around the anchor, look at the centre, wave hands.
       double t = now - bot_start_;
