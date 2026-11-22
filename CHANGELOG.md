@@ -4,6 +4,11 @@ Versioning: [Semantic Versioning](https://semver.org). The version lives in `CMa
 `release.json` and `Scripts/main.lua` (the release script refuses to build if they differ).
 The network protocol version (`kProtocolVersion`) changes only when old and new clients can no longer talk.
 
+## [0.8.2] - 2026-11-22
+### Changed
+- Performance: liveNpcs() memoised per frame; voice polling every 10 frames; name-effect colours every 2nd frame; window back buffer reused.
+- README: animated SVG banner and buttons, badges, screenshots.
+
 ## [0.8.1] - 2026-11-22
 ### Fixed
 - Preview model: actor tick and movement off, physics forced off, single-node Human_N_Pose, clamped feet-on-stage correction.

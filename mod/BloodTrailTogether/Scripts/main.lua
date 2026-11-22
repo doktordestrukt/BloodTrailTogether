@@ -7,7 +7,7 @@
 -- Everything that touches the game is wrapped in pcall: a failure disables that feature and is
 -- logged to UE4SS.log / BloodTrailTogether.log instead of crashing the game.
 
-local VERSION = "0.8.1"
+local VERSION = "0.8.2"
 local TAG = "[BloodTrailTogether] "
 local UEHelpers = require("UEHelpers")
 
@@ -1564,7 +1564,11 @@ local function ensureNpcRegistry()
     end)
     if not ok then log("NPC tracking hook failed (" .. tostring(err) .. "), using slow scans") end
 end
+-- Built once per frame and shared: NPC sync, voices, the smarter AI and the host check all ask
+-- for it, and each build reads every NPC's name (0.8: up to five builds per frame).
+local liveCache, liveCacheFrame = nil, -1
 local function liveNpcs()
+    if liveCacheFrame == frameNo and liveCache then return liveCache end
     -- one fallback scan per map (NPCs that existed before the hook), then the registry only
     if frameNo - lastRegistryScan > 100000 or (#npcRegistry == 0 and frameNo - lastRegistryScan > 900) then
         lastRegistryScan = frameNo
@@ -1582,6 +1586,7 @@ local function liveNpcs()
         end
     end
     npcRegistry = keep
+    liveCache, liveCacheFrame = out, frameNo
     return out
 end
 
@@ -1641,6 +1646,7 @@ local function clientSyncTick()
         for _, e in ipairs(liveNpcs()) do
             if not isPuppet(e.actor) and not mirrorIdOf[e.name] then
                 pcall(function() e.actor:K2_DestroyActor() end)
+                liveCacheFrame = -1      -- the list changed
             end
         end
     end
@@ -2452,7 +2458,7 @@ end
 -- NPCs in the joining player's own game, e.g. without NPC sync).
 EX.voiceSeen = {}
 function EX.voiceTick()
-    if frameNo % 6 ~= 0 then return end
+    if frameNo % 10 ~= 0 then return end
     ensureNpcRegistry()
     for _, e in ipairs(liveNpcs()) do
         local a = e.actor
@@ -2936,7 +2942,9 @@ function EX.nameFxTick(v, name, yaw)
             -- letters face the viewer; the text's own right is -right of the facing yaw
             a:K2_SetActorLocationAndRotation({ X = v[1] - rx * off, Y = v[2] - rY * off, Z = v[3] + 34 + (dz or 0) },
                 { Pitch = 0, Yaw = yaw, Roll = 0 }, false, {}, true)
-            pcall(function() a.TextRender:SetTextRenderColor({ R = r, G = g, B = b, A = 255 }) end)
+            if frameNo % 2 == 0 or not EX.lettersShown then    -- colours every 2nd frame (positions every frame)
+                pcall(function() a.TextRender:SetTextRenderColor({ R = r, G = g, B = b, A = 255 }) end)
+            end
             if not EX.lettersShown then pcall(function() a:SetActorHiddenInGame(false) end) end
         end
     end

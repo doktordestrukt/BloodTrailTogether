@@ -576,7 +576,9 @@ void draw(HDC dc) {
   double t = now_sec() - g_t0;
   g_hots.clear();
 
-  Bitmap bmp(W, H, PixelFormat32bppPARGB);
+  // one back buffer for the window's lifetime (was allocated 60 times a second)
+  static Bitmap* s_back = new Bitmap(W, H, PixelFormat32bppPARGB);
+  Bitmap& bmp = *s_back;
   Graphics g(&bmp);
   g.SetSmoothingMode(SmoothingModeAntiAlias);
   g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
