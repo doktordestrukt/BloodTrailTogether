@@ -4,6 +4,16 @@ Versioning: [Semantic Versioning](https://semver.org). The version lives in `CMa
 `release.json` and `Scripts/main.lua` (the release script refuses to build if they differ).
 The network protocol version (`kProtocolVersion`) changes only when old and new clients can no longer talk.
 
+## [0.8.0] - 2026-11-22
+### Added
+- Character customisation: wardrobe generated from the game's costume meshes/material instances; look = 10 indices, saved in look.txt, synced (`look` event); clothes as master-posed SkeletalMeshComponents on a holder actor; NPC Costume/hair hidden.
+- Live preview: dressed NPC in a lit stage above the map (Human_N_Pose), SceneCapture2D -> render target -> ExportRenderTarget(preview.png) ~15 fps; window shows it with drag/turntable rotation.
+- F9 window CHARACTER panel (pickers, outfits saved in outfits.txt, name-effect preview), 3RD PERSON toggle; bridge lines CAT/LOOK and CM.
+- Name effects (10) rendered per letter over the other player.
+- Third person: CameraActor over the right shoulder + dressed self body (VR untested).
+### Notes
+- Host with live AI NPCs keeps the game-animated remote body (soft-hide variant also crashed).
+
 ## [0.7.0] - 2026-11-22
 ### Added
 - Melee/unarmed NPCs (MaxAmmo 0) chase the joining player when closer (host: SimpleMoveToLocation; `npcmelee` hits applied on the client).

@@ -7,6 +7,8 @@
 #include <objidl.h>
 #include <gdiplus.h>
 #include <shellapi.h>
+#include <shlwapi.h>
+#include <commctrl.h>
 
 #include <algorithm>
 #include <atomic>
@@ -31,7 +33,8 @@ constexpr int W = 560, H = 640;
 constexpr UINT_PTR TIMER_ANIM = 1;
 constexpr int ID_NAME = 200;
 
-enum Action { A_NONE, A_HOST, A_REFRESH, A_DISCONNECT, A_SHARE, A_SIM_MIRROR, A_SIM_ORBIT, A_UPDATE, A_DEV_HOST, A_DEV_JOIN, A_JOIN_ROW, A_UPDATE_ROW };
+enum Action { A_NONE, A_HOST, A_REFRESH, A_DISCONNECT, A_SHARE, A_SIM_MIRROR, A_SIM_ORBIT, A_UPDATE, A_DEV_HOST, A_DEV_JOIN, A_JOIN_ROW, A_UPDATE_ROW,
+              A_CHAR_OPEN, A_CHAR_DONE, A_CPREV, A_CNEXT, A_OUTFIT_SAVE, A_OUTFIT_LOAD, A_OUTFIT_DEL, A_THIRD };
 
 struct Hot {
   RectF r;
@@ -48,7 +51,7 @@ std::unique_ptr<LobbyClient> g_lobby;
 
 // animation state
 double g_t0 = 0;
-float g_hover[16] = {};       // per-action hover amount 0..1
+float g_hover[32] = {};       // per-action hover amount 0..1
 float g_row_hover[64] = {};   // per server row
 float g_row_in[64] = {};      // per server row slide-in
 float g_share_knob = 1;
@@ -166,6 +169,400 @@ void button(Graphics& g, RectF r, const std::wstring& label, Action act, bool en
   text(g, label, rr, 14, rgba(245, 238, 232), FontStyleBold, StringAlignmentCenter);
 }
 
+// ---------------------------------------------------------------------------------------------
+// CHARACTER panel: live 3D preview (rendered by the game into preview.png), slot/colour pickers,
+// animated name effects. Slides in over the main view.
+struct WItem {
+  std::string name;
+  std::vector<std::string> colours;
+};
+std::vector<WItem> g_wd[5];               // top, bottom, shoes, hat, hair
+std::vector<std::string> g_fx_names;
+size_t g_wd_lines = 0;
+std::vector<int> g_look;                  // 10 values, 1-based
+float g_char_t = 0;                       // panel slide 0..1
+bool g_char_open = false;
+bool g_dragging = false;
+int g_drag_x = 0;
+double g_last_drag = -100;
+std::unique_ptr<Gdiplus::Bitmap> g_preview;
+FILETIME g_preview_time{};
+float g_row_flash[9] = {};
+
+const char* kSlotNames[5] = {"top", "bottom", "shoes", "hat", "hair"};
+
+void wardrobe_sync() {
+  App& a = app();
+  std::lock_guard<std::mutex> lk(a.mu);
+  if (a.wardrobe.size() != g_wd_lines) {
+    g_wd_lines = a.wardrobe.size();
+    for (auto& v : g_wd) v.clear();
+    g_fx_names.clear();
+    for (auto& l : a.wardrobe) {
+      // "<slot> <idx> <name>|<c1>;<c2>"   or   "fx 0 <n1>;<n2>"
+      size_t s1 = l.find(' '), s2 = l.find(' ', s1 + 1);
+      if (s1 == std::string::npos || s2 == std::string::npos) continue;
+      std::string slot = l.substr(0, s1), rest = l.substr(s2 + 1);
+      auto split = [](const std::string& s, char sep) {
+        std::vector<std::string> out;
+        size_t p = 0;
+        while (p <= s.size()) {
+          size_t q = s.find(sep, p);
+          if (q == std::string::npos) q = s.size();
+          if (q > p) out.push_back(s.substr(p, q - p));
+          p = q + 1;
+        }
+        return out;
+      };
+      if (slot == "fx") { g_fx_names = split(rest, ';'); continue; }
+      for (int i = 0; i < 5; ++i)
+        if (slot == kSlotNames[i]) {
+          size_t bar = rest.find('|');
+          WItem it;
+          it.name = rest.substr(0, bar);
+          if (bar != std::string::npos) it.colours = split(rest.substr(bar + 1), ';');
+          g_wd[i].push_back(it);
+        }
+    }
+  }
+  if (g_look.size() != 10) {
+    g_look.clear();
+    for (size_t p = 0; p < a.look.size();) {
+      while (p < a.look.size() && a.look[p] == ' ') ++p;
+      if (p >= a.look.size()) break;
+      g_look.push_back(atoi(a.look.c_str() + p));
+      while (p < a.look.size() && a.look[p] != ' ') ++p;
+    }
+    if (g_look.size() != 10) g_look.clear();
+  }
+}
+
+void look_commit() {
+  std::string s;
+  for (size_t i = 0; i < g_look.size(); ++i) s += (i ? " " : "") + std::to_string(g_look[i]);
+  std::lock_guard<std::mutex> lk(app().mu);
+  app().look = s;
+}
+
+// row r -> (look index, list size); row 4 = shoes colour
+int row_index(int r) { static const int idx[9] = {0, 1, 2, 3, 5, 6, 7, 8, 9}; return idx[r]; }
+int row_count(int r) {
+  if (g_look.size() != 10) return 0;
+  auto item = [&](int slot, int li) -> const WItem* {
+    int i = g_look[li] - 1;
+    return (i >= 0 && i < (int)g_wd[slot].size()) ? &g_wd[slot][i] : nullptr;
+  };
+  switch (r) {
+    case 0: return (int)g_wd[0].size();
+    case 1: { auto it = item(0, 0); return it ? (int)it->colours.size() : 0; }
+    case 2: return (int)g_wd[1].size();
+    case 3: { auto it = item(1, 2); return it ? (int)it->colours.size() : 0; }
+    case 4: return g_wd[2].size() > 1 ? 1 + (int)g_wd[2][1].colours.size() : 1;
+    case 5: return (int)g_wd[3].size();
+    case 6: { auto it = item(3, 6); return it ? (int)it->colours.size() : 0; }
+    case 7: return (int)g_wd[4].size();
+    case 8: return (int)g_fx_names.size();
+  }
+  return 0;
+}
+std::string row_value(int r) {
+  if (g_look.size() != 10) return "-";
+  int v = g_look[row_index(r)] - 1;
+  auto name_of = [&](int slot) { return (v >= 0 && v < (int)g_wd[slot].size()) ? g_wd[slot][v].name : std::string("-"); };
+  auto colour_of = [&](int slot, int li) {
+    int i = g_look[li] - 1;
+    if (i < 0 || i >= (int)g_wd[slot].size() || g_wd[slot][i].colours.empty()) return std::string("\xE2\x80\x94");
+    const auto& cs = g_wd[slot][i].colours;
+    return (v >= 0 && v < (int)cs.size()) ? cs[v] : cs[0];
+  };
+  switch (r) {
+    case 0: return name_of(0);
+    case 1: return colour_of(0, 0);
+    case 2: return name_of(1);
+    case 3: return colour_of(1, 2);
+    case 4: {
+      if (g_look[4] <= 1 || g_wd[2].size() < 2) return "None";
+      const auto& cs = g_wd[2][1].colours;
+      int c = g_look[5] - 1;
+      return "Sneakers \xC2\xB7 " + ((c >= 0 && c < (int)cs.size()) ? cs[c] : std::string("-"));
+    }
+    case 5: return name_of(3);
+    case 6: return colour_of(3, 6);
+    case 7: return name_of(4);
+    case 8: return (v >= 0 && v < (int)g_fx_names.size()) ? g_fx_names[v] : "Classic";
+  }
+  return "-";
+}
+void row_step(int r, int d) {
+  int n = row_count(r);
+  if (n <= 0 || g_look.size() != 10) return;
+  if (r == 4) {  // shoes: 0 = none, 1..n = sneakers in colour n
+    int c = g_look[4] <= 1 ? 0 : g_look[5];
+    c = ((c + d) % n + n) % n;
+    g_look[4] = c == 0 ? 1 : 2;
+    g_look[5] = c == 0 ? 1 : c;
+    g_row_flash[r] = 1.0f;
+    look_commit();
+    return;
+  }
+  int li = row_index(r);
+  int v = g_look[li] - 1;
+  v = ((v + d) % n + n) % n;
+  g_look[li] = v + 1;
+  if (r == 0 || r == 2 || r == 5) g_look[li + 1] = 1;  // new item: first colour
+  g_row_flash[r] = 1.0f;
+  look_commit();
+}
+
+// same colours as the game script's name effects (EX.fxColour)
+Color fx_colour(int fx, int i, int n, double t, float& dy) {
+  dy = 0;
+  float u = n > 1 ? (float)(i) / (n - 1) : 0;
+  auto hsv = [](double h, double s, double v) {
+    h = fmod(fmod(h, 1.0) + 1.0, 1.0) * 6;
+    int k = (int)h;
+    double f = h - k, p = v * (1 - s), q = v * (1 - s * f), tt = v * (1 - s * (1 - f));
+    double r = v, g = tt, b = p;
+    switch (k) {
+      case 1: r = q; g = v; b = p; break;
+      case 2: r = p; g = v; b = tt; break;
+      case 3: r = p; g = q; b = v; break;
+      case 4: r = tt; g = p; b = v; break;
+      case 5: r = v; g = p; b = q; break;
+    }
+    return Color(255, (BYTE)(r * 255), (BYTE)(g * 255), (BYTE)(b * 255));
+  };
+  switch (fx) {
+    case 2: return hsv(t * 0.25 + u * 0.6, 0.85, 1);
+    case 3: {
+      static const int a[4][3] = {{255, 140, 40}, {255, 60, 120}, {150, 60, 255}, {255, 140, 40}};
+      double k = fmod(u + t * 0.15, 1.0) * 3;
+      int j = (int)k;
+      double f = k - j;
+      return Color(255, (BYTE)(a[j][0] + (a[j + 1][0] - a[j][0]) * f), (BYTE)(a[j][1] + (a[j + 1][1] - a[j][1]) * f),
+                   (BYTE)(a[j][2] + (a[j + 1][2] - a[j][2]) * f));
+    }
+    case 4: { double f = (rand() % 1000) / 1000.0; return Color(255, 255, (BYTE)(60 + 170 * f * (0.6 + 0.4 * sin(t * 9 + i))), (BYTE)(20 * f)); }
+    case 5: { double s = 0.5 + 0.5 * sin(t * 3 + i * 0.9); return Color(255, (BYTE)(120 + 135 * s), (BYTE)(210 + 45 * s), 255); }
+    case 6: {
+      double sweep = std::max(0.0, 1 - fabs(fmod(t * 0.6, 1.6) - 0.3 - u) * 5);
+      return Color(255, 255, (BYTE)(190 + 65 * sweep), (BYTE)(40 + 215 * sweep));
+    }
+    case 7: { double s = 0.5 + 0.5 * sin(t * 4 - u * 4); return Color(255, (BYTE)(80 + 100 * s), 255, (BYTE)(40 + 60 * s)); }
+    case 8: { double s = 0.5 + 0.5 * sin(t * 5); return Color(255, (BYTE)(150 + 105 * s), (BYTE)(20 * s), (BYTE)(20 * s)); }
+    case 9:
+      if (rand() % 100 < 8) { dy = (float)((rand() % 100) / 100.0 - 0.5) * 6; return hsv((rand() % 100) / 100.0, 1, 1); }
+      return Color(255, 235, 235, 235);
+    case 10: dy = (float)(sin(t * 5 - i * 0.7) * 4); return hsv(t * 0.2 + u * 0.5, 0.75, 1);
+  }
+  return Color(255, 235, 225, 215);
+}
+
+void preview_reload() {
+  std::wstring path = app().mod_dir + L"\\preview.png";
+  WIN32_FILE_ATTRIBUTE_DATA fa;
+  if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fa)) return;
+  if (CompareFileTime(&fa.ftLastWriteTime, &g_preview_time) == 0) return;
+  HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+  if (f == INVALID_HANDLE_VALUE) return;
+  DWORD size = GetFileSize(f, nullptr), got = 0;
+  std::vector<BYTE> buf(size);
+  BOOL ok = size > 0 && ReadFile(f, buf.data(), size, &got, nullptr) && got == size;
+  CloseHandle(f);
+  if (!ok) return;
+  IStream* st = SHCreateMemStream(buf.data(), size);
+  if (!st) return;
+  std::unique_ptr<Bitmap> src(Bitmap::FromStream(st));
+  st->Release();
+  if (!src || src->GetLastStatus() != Ok || src->GetWidth() == 0) return;  // half-written file: try again next tick
+  g_preview_time = fa.ftLastWriteTime;
+  // copy out with alpha forced opaque (scene captures store inverted / empty alpha)
+  auto out = std::make_unique<Bitmap>(src->GetWidth(), src->GetHeight(), PixelFormat32bppARGB);
+  Rect r(0, 0, src->GetWidth(), src->GetHeight());
+  BitmapData sd, dd;
+  if (src->LockBits(&r, ImageLockModeRead, PixelFormat32bppARGB, &sd) == Ok) {
+    if (out->LockBits(&r, ImageLockModeWrite, PixelFormat32bppARGB, &dd) == Ok) {
+      for (UINT y = 0; y < (UINT)r.Height; ++y) {
+        auto* s = (uint32_t*)((BYTE*)sd.Scan0 + y * sd.Stride);
+        auto* d = (uint32_t*)((BYTE*)dd.Scan0 + y * dd.Stride);
+        for (UINT x = 0; x < (UINT)r.Width; ++x) d[x] = s[x] | 0xFF000000u;
+      }
+      out->UnlockBits(&dd);
+    }
+    src->UnlockBits(&sd);
+  }
+  g_preview = std::move(out);
+}
+
+const RectF kPreview(24, 92, 236, 360);
+
+// ---- saved outfits: "name|look" lines in outfits.txt next to the mod
+struct Outfit { std::string name, look; };
+std::vector<Outfit> g_outfits;
+HWND g_outfit_edit = nullptr;
+float g_outfit_scroll = 0;
+
+std::wstring outfits_path() { return app().mod_dir + L"\\outfits.txt"; }
+void outfits_load() {
+  g_outfits.clear();
+  FILE* f = nullptr;
+  if (_wfopen_s(&f, outfits_path().c_str(), L"r") != 0 || !f) return;
+  char line[512];
+  while (fgets(line, sizeof(line), f)) {
+    std::string l = line;
+    while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
+    size_t bar = l.find('|');
+    if (bar != std::string::npos && bar > 0) g_outfits.push_back({l.substr(0, bar), l.substr(bar + 1)});
+  }
+  fclose(f);
+}
+void outfits_save() {
+  FILE* f = nullptr;
+  if (_wfopen_s(&f, outfits_path().c_str(), L"w") != 0 || !f) return;
+  for (auto& o : g_outfits) fprintf(f, "%s|%s\n", o.name.c_str(), o.look.c_str());
+  fclose(f);
+}
+std::string look_string() {
+  std::string s;
+  for (size_t i = 0; i < g_look.size(); ++i) s += (i ? " " : "") + std::to_string(g_look[i]);
+  return s;
+}
+void outfit_save_current() {
+  wchar_t buf[64] = {};
+  GetWindowTextW(g_outfit_edit, buf, 64);
+  std::string name = to_utf8(buf);
+  for (auto& c : name) if (c == '|') c = '/';
+  if (name.empty()) name = "Outfit " + std::to_string(g_outfits.size() + 1);
+  for (auto& o : g_outfits)
+    if (o.name == name) { o.look = look_string(); outfits_save(); toast(L"Outfit updated: " + to_wide(name)); return; }
+  g_outfits.push_back({name, look_string()});
+  outfits_save();
+  SetWindowTextW(g_outfit_edit, L"");
+  toast(L"Outfit saved: " + to_wide(name));
+}
+void outfit_load(int i) {
+  if (i < 0 || i >= (int)g_outfits.size()) return;
+  std::vector<int> v;
+  const std::string& s = g_outfits[i].look;
+  for (size_t p = 0; p < s.size();) {
+    while (p < s.size() && s[p] == ' ') ++p;
+    if (p >= s.size()) break;
+    v.push_back(atoi(s.c_str() + p));
+    while (p < s.size() && s[p] != ' ') ++p;
+  }
+  if (v.size() != 10) return;
+  g_look = v;
+  for (auto& f : g_row_flash) f = 1.0f;
+  look_commit();
+  toast(L"Wearing: " + to_wide(g_outfits[i].name));
+}
+
+
+void draw_char_panel(Graphics& g, double t) {
+  g_hots.clear();
+  float e = 1 - powf(1 - g_char_t, 3);
+  float ox = (1 - e) * W;
+  g.TranslateTransform(ox, 0);
+  LinearGradientBrush bg(PointF(0, 0), PointF(0, (REAL)H), rgba(24, 10, 10), rgba(8, 7, 7));
+  g.FillRectangle(&bg, 0, 0, W, H);
+  text(g, L"CHARACTER", RectF(24, 18, 300, 34), 26, rgba(235, 228, 220), FontStyleBold, StringAlignmentNear, StringAlignmentCenter, L"Segoe UI Black");
+  text(g, L"How the other player sees you. Saved automatically.", RectF(24, 50, 480, 20), 12, rgba(150, 135, 130));
+  {
+    LinearGradientBrush lb(PointF(0, 0), PointF((REAL)W, 0), rgba(120, 10, 10, 0), rgba(120, 10, 10, 0));
+    Color cols[] = {rgba(120, 10, 10, 0), rgba(220, 30, 30, 230), rgba(120, 10, 10, 0)};
+    REAL pos[] = {0.0f, std::clamp((float)fmod(t * 0.35, 1.0), 0.01f, 0.99f), 1.0f};
+    lb.SetInterpolationColors(cols, pos, 3);
+    g.FillRectangle(&lb, 24.0f, 74.0f, (REAL)(W - 48), 2.0f);
+  }
+  // preview stage
+  RectF pr = kPreview;
+  LinearGradientBrush stage(PointF(pr.X, pr.Y), PointF(pr.X, pr.Y + pr.Height), rgba(40, 14, 14), rgba(6, 5, 5));
+  fill_round(g, pr, 14, stage);
+  if (g_preview) {
+    GraphicsPath clip;
+    round_rect(clip, pr, 14);
+    g.SetClip(&clip);
+    float iw = (float)g_preview->GetWidth(), ih = (float)g_preview->GetHeight();
+    float sc = std::max(pr.Width / iw, pr.Height / ih);
+    g.DrawImage(g_preview.get(), RectF(pr.X + (pr.Width - iw * sc) / 2, pr.Y + (pr.Height - ih * sc) / 2, iw * sc, ih * sc));
+    g.ResetClip();
+  } else {
+    text(g, L"Loading preview...\n(start the game first)", pr, 12.5f, rgba(150, 138, 132), FontStyleRegular, StringAlignmentCenter);
+  }
+  float pulse = (float)(0.5 + 0.5 * sin(t * 2.2));
+  stroke_round(g, pr, 14, rgba(210, 35, 35, 60 + (int)(90 * pulse)), 1.6f);
+  text(g, L"\x27F2  drag to rotate", RectF(pr.X, pr.Y + pr.Height + 4, pr.Width, 18), 11, rgba(140, 128, 122), FontStyleRegular, StringAlignmentCenter);
+
+  // pickers
+  static const wchar_t* labels[9] = {L"TOP", L"COLOUR", L"BOTTOM", L"COLOUR", L"SHOES", L"HAT", L"COLOUR", L"HAIR", L"NAME EFFECT"};
+  for (int r = 0; r < 9; ++r) {
+    float y = 92 + r * 40.0f;
+    RectF row(278, y, 258, 34);
+    g_row_flash[r] = std::max(0.0f, g_row_flash[r] - 0.04f);
+    SolidBrush rb(rgba(255, 255, 255, 10 + (int)(40 * g_row_flash[r])));
+    fill_round(g, row, 8, rb);
+    text(g, labels[r], RectF(row.X + 10, y, 90, 34), 10.5f, rgba(225, 60, 55), FontStyleBold);
+    int n = row_count(r);
+    text(g, to_wide(row_value(r)), RectF(row.X + 92, y, 120, 34), 13, n > 0 ? rgba(240, 232, 226) : rgba(110, 100, 98), FontStyleBold, StringAlignmentCenter);
+    // arrows (hover glow handled by button())
+    RectF lb(row.X + 206, y + 4, 24, 26), rb2(row.X + 232, y + 4, 24, 26);
+    g.TranslateTransform(-ox, 0);  // hit boxes in window coordinates
+    lb.X += ox; rb2.X += ox;
+    button(g, lb, L"\x2039", A_CPREV, n > 1, false, 40 + r);
+    button(g, rb2, L"\x203A", A_CNEXT, n > 1, false, 40 + r);
+    g.TranslateTransform(ox, 0);
+  }
+  // name with its effect
+  RectF nr(278, 460, 258, 48);
+  SolidBrush nb(rgba(0, 0, 0, 90));
+  fill_round(g, nr, 10, nb);
+  int fx = g_look.size() == 10 ? g_look[9] : 1;
+  std::wstring name = to_wide(current_name());
+  if (name.size() > 16) name.resize(16);
+  FontFamily ff(L"Segoe UI Black");
+  Font f(&ff, 20, FontStyleBold, UnitPixel);
+  float cw = 15.0f, total = cw * name.size();
+  for (size_t i = 0; i < name.size(); ++i) {
+    float dy;
+    Color c = fx_colour(fx, (int)i, (int)name.size(), t, dy);
+    SolidBrush b(c);
+    wchar_t ch[2] = {name[i], 0};
+    StringFormat sf;
+    sf.SetAlignment(StringAlignmentCenter);
+    sf.SetLineAlignment(StringAlignmentCenter);
+    g.DrawString(ch, 1, &f, RectF(nr.X + (nr.Width - total) / 2 + i * cw, nr.Y + dy, cw, nr.Height), &sf, &b);
+  }
+  // outfit name + save
+  RectF ef(278, 520, 170, 32);
+  SolidBrush eb(rgba(0, 0, 0, 90));
+  fill_round(g, ef, 8, eb);
+  stroke_round(g, ef, 8, rgba(200, 40, 40, GetFocus() == g_outfit_edit ? 200 : 70), 1.2f);
+  g.TranslateTransform(-ox, 0);
+  button(g, RectF(454 + ox, 520, 82, 32), L"SAVE", A_OUTFIT_SAVE, true, false);
+  button(g, RectF(W - 24 - 258.0f + ox, 566, 258, 46), L"DONE", A_CHAR_DONE, true, true);
+  g.TranslateTransform(ox, 0);
+  // saved outfits (left, under the preview)
+  text(g, L"OUTFITS", RectF(24, 474, 120, 20), 11, rgba(225, 60, 55), FontStyleBold);
+  RectF ol(24, 496, 236, 116);
+  SolidBrush olb(rgba(0, 0, 0, 70));
+  fill_round(g, ol, 10, olb);
+  if (g_outfits.empty())
+    text(g, L"Name an outfit and press SAVE", ol, 11.5f, rgba(140, 128, 122), FontStyleRegular, StringAlignmentCenter);
+  float maxs = std::max(0.0f, g_outfits.size() * 28.0f + 6 - ol.Height);
+  g_outfit_scroll = std::clamp(g_outfit_scroll, 0.0f, maxs);
+  g.SetClip(ol);
+  for (size_t i = 0; i < g_outfits.size() && i < 14; ++i) {
+    RectF r(ol.X + 6, ol.Y + 6 + i * 28.0f - g_outfit_scroll, ol.Width - 12, 24);
+    if (r.Y + r.Height < ol.Y || r.Y > ol.Y + ol.Height) continue;
+    g.TranslateTransform(-ox, 0);
+    button(g, RectF(r.X + ox, r.Y, r.Width - 30, r.Height), to_wide(g_outfits[i].name), A_OUTFIT_LOAD, true, false, 50 + (int)i);
+    button(g, RectF(r.X + r.Width - 26 + ox, r.Y, 26, r.Height), L"\x2715", A_OUTFIT_DEL, true, false, 50 + (int)i);
+    g.TranslateTransform(ox, 0);
+  }
+  g.ResetClip();
+  g.ResetTransform();
+}
+
 void draw(HDC dc) {
   App& a = app();
   EngineSnapshot s = a.engine->snapshot();
@@ -263,8 +660,10 @@ void draw(HDC dc) {
   text(g, L"Share my sounds", RectF(426, 188, 120, 34), 12, rgba(190, 178, 172));
 
   // main actions
-  button(g, RectF(24, 236, 250, 46), idle ? L"HOST GAME" : s.role == "host" ? L"HOSTING" : L"IN A GAME", A_HOST, idle, true);
-  button(g, RectF(286, 236, 250, 46), L"DISCONNECT", A_DISCONNECT, !idle, false);
+  button(g, RectF(24, 236, 124, 46), idle ? L"HOST GAME" : s.role == "host" ? L"HOSTING" : L"IN GAME", A_HOST, idle, true);
+  button(g, RectF(154, 236, 124, 46), L"CHARACTER", A_CHAR_OPEN, true, false);
+  button(g, RectF(284, 236, 124, 46), a.third_person ? L"3RD PERSON '13" : L"3RD PERSON", A_THIRD, true, a.third_person.load());
+  button(g, RectF(414, 236, 122, 46), L"DISCONNECT", A_DISCONNECT, !idle, false);
 
   // server list
   text(g, L"SERVER LIST", RectF(24, 296, 200, 26), 13, rgba(225, 60, 55), FontStyleBold);
@@ -334,6 +733,8 @@ void draw(HDC dc) {
     text(g, g_toast, tr, 13.5f, rgba(255, 245, 240, al), FontStyleBold, StringAlignmentCenter);
   }
 
+  if (g_char_t > 0.001f) draw_char_panel(g, t);
+
   // whole-window fade-in when shown
   if (g_open < 0.999f) {
     SolidBrush fade(rgba(9, 8, 8, (int)(255 * (1 - g_open))));
@@ -393,7 +794,7 @@ void tick() {
     }
   }
   // animations
-  for (int i = 0; i < 16; ++i) {
+  for (int i = 0; i < 32; ++i) {
     bool hot = false;
     for (auto& h : g_hots) if (h.act == i && h.row < 0 && h.enabled && inside(h.r, g_mouse_x, g_mouse_y)) hot = true;
     g_hover[i] = approach(g_hover[i], hot ? 1.0f : 0.0f, 0.18f);
@@ -407,6 +808,20 @@ void tick() {
   g_share_knob = approach(g_share_knob, g_share ? 1.0f : 0.0f, 0.25f);
   g_scroll = approach(g_scroll, g_scroll_target, 0.25f);
   g_open = approach(g_open, 1.0f, 0.12f);
+  wardrobe_sync();
+  if (dev_ui() && !g_char_open && now - g_t0 > 12 && now - g_t0 < 12.1 &&
+      a.config.get("Dev.SelfTest").find("charpanel") != std::string::npos) {  // developer: open the panel for screenshots
+    g_char_open = true;
+    a.char_open = true;
+    outfits_load();
+    ShowWindow(g_name, SW_HIDE);
+    ShowWindow(g_outfit_edit, SW_SHOW);
+  }
+  g_char_t = approach(g_char_t, g_char_open ? 1.0f : 0.0f, 0.14f);
+  if (g_char_open) {
+    preview_reload();
+    if (!g_dragging && now - g_last_drag > 3.0) a.char_yaw = fmodf(a.char_yaw + 0.35f, 360.0f);  // turntable
+  }
   InvalidateRect(g_wnd, nullptr, FALSE);
 }
 
@@ -444,6 +859,35 @@ void click(int x, int y) {
           ShellExecuteW(nullptr, L"open", L"https://github.com/doktordestrukt/BloodTrailTogether/releases/latest", nullptr, nullptr, SW_SHOWNORMAL);
           toast(to_wide(g_servers[it->row].host_name) + L" runs v" + to_wide(g_servers[it->row].version) + L" \x2014 update so you match");
         }
+        break;
+      case A_CHAR_OPEN:
+        g_char_open = true;
+        app().char_open = true;
+        outfits_load();
+        ShowWindow(g_name, SW_HIDE);
+        ShowWindow(g_outfit_edit, SW_SHOW);
+        break;
+      case A_CHAR_DONE:
+        g_char_open = false;
+        app().char_open = false;
+        ShowWindow(g_outfit_edit, SW_HIDE);
+        ShowWindow(g_name, SW_SHOW);
+        toast(L"Look saved");
+        break;
+      case A_CPREV: row_step(it->row - 40, -1); break;
+      case A_CNEXT: row_step(it->row - 40, 1); break;
+      case A_OUTFIT_SAVE: outfit_save_current(); break;
+      case A_OUTFIT_LOAD: outfit_load(it->row - 50); break;
+      case A_OUTFIT_DEL:
+        if (it->row - 50 >= 0 && it->row - 50 < (int)g_outfits.size()) {
+          toast(L"Deleted: " + to_wide(g_outfits[it->row - 50].name));
+          g_outfits.erase(g_outfits.begin() + (it->row - 50));
+          outfits_save();
+        }
+        break;
+      case A_THIRD:
+        app().third_person = !app().third_person;
+        toast(app().third_person ? L"Third person: over the right shoulder" : L"First person");
         break;
       default: break;
     }
@@ -485,6 +929,11 @@ LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_MOUSEMOVE: {
       g_mouse_x = GET_X_LPARAM(l);
       g_mouse_y = GET_Y_LPARAM(l);
+      if (g_dragging) {
+        app().char_yaw = fmodf(app().char_yaw + (g_mouse_x - g_drag_x) * 0.6f + 360.0f, 360.0f);
+        g_drag_x = g_mouse_x;
+        g_last_drag = now_sec();
+      }
       TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, h, 0};
       TrackMouseEvent(&tme);
       bool hand = false;
@@ -496,13 +945,26 @@ LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
       if (LOWORD(l) == HTCLIENT) return TRUE;  // set in WM_MOUSEMOVE
       break;
     case WM_MOUSELEAVE: g_mouse_x = g_mouse_y = -1; g_mouse_down = false; return 0;
-    case WM_LBUTTONDOWN: g_mouse_down = true; SetCapture(h); SetFocus(h); return 0;
+    case WM_LBUTTONDOWN:
+      g_mouse_down = true;
+      SetCapture(h);
+      SetFocus(h);
+      if (g_char_open && inside(kPreview, GET_X_LPARAM(l), GET_Y_LPARAM(l))) {
+        g_dragging = true;
+        g_drag_x = GET_X_LPARAM(l);
+        g_last_drag = now_sec();
+      }
+      return 0;
     case WM_LBUTTONUP:
-      if (g_mouse_down) click(GET_X_LPARAM(l), GET_Y_LPARAM(l));
+      if (g_mouse_down && !g_dragging) click(GET_X_LPARAM(l), GET_Y_LPARAM(l));
       g_mouse_down = false;
+      g_dragging = false;
       ReleaseCapture();
       return 0;
-    case WM_MOUSEWHEEL: g_scroll_target -= GET_WHEEL_DELTA_WPARAM(w) / 120.0f * 52.0f; return 0;
+    case WM_MOUSEWHEEL:
+      if (g_char_open) g_outfit_scroll -= GET_WHEEL_DELTA_WPARAM(w) / 120.0f * 28.0f;
+      else g_scroll_target -= GET_WHEEL_DELTA_WPARAM(w) / 120.0f * 52.0f;
+      return 0;
     case WM_COMMAND:
       if (LOWORD(w) == ID_NAME && HIWORD(w) == EN_KILLFOCUS) apply_name();
       return 0;
@@ -546,12 +1008,18 @@ DWORD WINAPI ui_thread(LPVOID) {
                            142, 195, 200, 22, g_wnd, (HMENU)(INT_PTR)ID_NAME, nullptr, nullptr);
   SendMessageW(g_name, WM_SETFONT, (WPARAM)g_name_font, TRUE);
   SendMessageW(g_name, EM_SETLIMITTEXT, 24, 0);
+  g_outfit_edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 288, 525, 152, 22, g_wnd, (HMENU)(INT_PTR)(ID_NAME + 1),
+                                  nullptr, nullptr);
+  SendMessageW(g_outfit_edit, WM_SETFONT, (WPARAM)g_name_font, TRUE);
+  SendMessageW(g_outfit_edit, EM_SETLIMITTEXT, 30, 0);
+  SendMessageW(g_outfit_edit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Outfit name");
 
   ShowWindow(g_wnd, SW_SHOWNOACTIVATE);
   SetTimer(g_wnd, TIMER_ANIM, 16, nullptr);
   MSG msg;
   while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
     if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN && msg.hwnd == g_name) { apply_name(); SetFocus(g_wnd); continue; }
+    if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN && msg.hwnd == g_outfit_edit) { outfit_save_current(); SetFocus(g_wnd); continue; }
     TranslateMessage(&msg);
     DispatchMessageW(&msg);
   }

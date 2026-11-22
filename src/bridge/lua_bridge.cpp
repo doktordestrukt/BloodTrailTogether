@@ -56,6 +56,17 @@ std::string lua_handle_request(const std::string& req) {
   std::string line;
   while (std::getline(lines, line)) {
     if (line.size() < 2) continue;
+    if (line.rfind("CAT ", 0) == 0) {  // wardrobe catalogue line (sent once at handshake)
+      std::lock_guard<std::mutex> lk(a.mu);
+      if (line.rfind("CAT top 1 ", 0) == 0) a.wardrobe.clear();
+      a.wardrobe.push_back(line.substr(4));
+      continue;
+    }
+    if (line.rfind("LOOK ", 0) == 0) {  // the script's saved look (start-up)
+      std::lock_guard<std::mutex> lk(a.mu);
+      a.look = line.substr(5);
+      continue;
+    }
     char kind = line[0];
     std::string rest = line.substr(2);
     std::istringstream in(rest);
@@ -128,6 +139,12 @@ std::string lua_handle_request(const std::string& req) {
     }
   }
 
+  {  // character menu state for the script: open flag, preview yaw, current look
+    std::lock_guard<std::mutex> lk(a.mu);
+    char cm[64];
+    snprintf(cm, sizeof(cm), "CM %d %.1f %d ", a.char_open ? 1 : 0, (double)a.char_yaw.load(), a.third_person ? 1 : 0);
+    out += cm + (a.look.empty() ? std::string("-") : a.look) + "\n";
+  }
   EngineSnapshot s = eng->snapshot();
   char st[512];
   snprintf(st, sizeof(st), "ST %s %s %d %.0f %.1f %d %s %s %d\n", s.state.c_str(), s.role.empty() ? "-" : s.role.c_str(),

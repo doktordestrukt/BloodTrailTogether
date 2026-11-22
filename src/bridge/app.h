@@ -4,6 +4,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "core/config.h"
 #include "engine/net_engine.h"
@@ -31,6 +32,13 @@ struct App {
       stat_sounds_in{0}, stat_travel{0};
 
   void save_name(const std::string& name);
+
+  // Character customisation (window <-> game script). Guarded by `mu`.
+  std::vector<std::string> wardrobe;   // "CAT ..." lines from the script
+  std::string look;                    // current look string (script loads it; the window edits it)
+  std::atomic<bool> char_open{false};  // character menu open (the script renders the preview)
+  std::atomic<float> char_yaw{0.0f};   // preview model rotation (degrees)
+  std::atomic<bool> third_person{false};  // over-the-right-shoulder camera in game
 };
 
 App& app();

@@ -7,7 +7,7 @@
 -- Everything that touches the game is wrapped in pcall: a failure disables that feature and is
 -- logged to UE4SS.log / BloodTrailTogether.log instead of crashing the game.
 
-local VERSION = "0.7.0"
+local VERSION = "0.8.0"
 local TAG = "[BloodTrailTogether] "
 local UEHelpers = require("UEHelpers")
 
@@ -187,8 +187,12 @@ local function findAsset(path, noLoad)
     o = StaticFindObject(path)
     local now = os.clock()
     if not valid(o) and not noLoad and (assetFailAt[path] == nil or now - assetFailAt[path] > 5) then
-        pcall(LoadAsset, path:match("^(.-)%.") or path)
+        pcall(LoadAsset, path)                                    -- "/Game/x/Asset.Asset" (verified: returns the asset)
         o = StaticFindObject(path)
+        if not valid(o) then
+            pcall(LoadAsset, path:match("^(.-)%.") or path)       -- package path (sounds, classes)
+            o = StaticFindObject(path)
+        end
         if not valid(o) then assetFailAt[path] = now end
     end
     if valid(o) then assetCache[path] = o assetFailAt[path] = nil return o end
@@ -616,7 +620,8 @@ local function updateAvatar(v, peerName, quality, rtt, shapes)
             avatar.hpFg:K2_SetActorLocationAndRotation({ X = v[1] + rx * shift, Y = v[2] + rY * shift, Z = bz }, { Pitch = 0, Yaw = yaw, Roll = 0 }, false, {}, true)
             avatar.hpFg:SetActorScale3D({ X = 0.006, Y = w, Z = 0.025 })
         end)
-        local label = string.format("%s  %dms", peerName, rtt)
+        local okFx, fxOn = pcall(EX.nameFxTick, v, peerName, yaw)
+        local label = (okFx and fxOn) and string.format("%dms", rtt) or string.format("%s  %dms", peerName, rtt)
         if label ~= lastTagName and frameNo % 45 == 0 then
             lastTagName = label
             avatar.tag.TextRender:K2_SetText(FText(label))
@@ -850,7 +855,10 @@ local function applyBulletHit(npc, bone, x, y, z, nx, ny, nz, causer, exitWound)
 end
 
 local function isPuppet(actor)
-    return valid(puppet) and valid(actor) and actor:GetFullName() == puppet:GetFullName()
+    if not valid(actor) then return false end
+    local n = actor:GetFullName()
+    if valid(puppet) and n == puppet:GetFullName() then return true end
+    return EX.pv ~= nil and valid(EX.pv.npc) and n == EX.pv.npc:GetFullName()   -- character preview model
 end
 
 local applyingRemoteHit = false  -- set while replaying the other player's hit, so it is not sent back
@@ -906,6 +914,7 @@ end
 local pup = nil   -- cached components of the remote body (property lookups are slow; do them once)
 
 local function destroyPuppet()
+    if valid(puppet) then pcall(EX.undress, puppet) end
     if pup and valid(pup.holder) then pcall(function() pup.holder:K2_DestroyActor() end) end
     if valid(puppet) then pcall(function() puppet:K2_DestroyActor() end) end
     puppet, puppetLast, pup = nil, nil, nil
@@ -1001,6 +1010,7 @@ local function setupBody(a, noIK)
     -- Don't let VR hands grab or drag the other player (VRTraceChannel = GameTraceChannel1 = 14).
     pcall(function() P.mesh:SetCollisionResponseToChannel(14, 0) end)
     local ok, err = pcall(function()
+        -- tested 0.7: hiding the NPC mesh more gently (still "visible", just not drawn) crashed too
         if selfTest:find("nopose", 1, true) or P.noIK then error("not used while AI NPCs are around (host)") end
         local cls = StaticFindObject("/Script/Engine.PoseableMeshComponent")
         -- The pose copy lives on its own holder actor, NOT on the NPC: the game's NPC code walks over
@@ -1038,7 +1048,11 @@ local function setupBody(a, noIK)
         end
         for _, c in ipairs(P.parts) do pcall(function() c:SetMasterPoseComponent(pose, true) end) end
         P.hideMesh = function()
-            P.mesh:SetVisibility(false, false)                              -- children (wounds, decals) stay
+            if P.softHide then
+                pcall(function() P.mesh:SetCastShadow(false) end)
+            else
+                P.mesh:SetVisibility(false, false)                          -- children (wounds, decals) stay
+            end
             pcall(function() P.mesh:SetRenderInMainPass(false) end)
             for _, c in ipairs(P.parts) do pcall(function() c:SetMasterPoseComponent(pose, true) end) end
         end
@@ -1307,7 +1321,7 @@ local function updatePuppet(v)
     local P = pup
     local flags = math.floor(v[43] or 0)
     -- AI NPCs appeared (or went away) on the host: rebuild the body in the matching mode
-    if frameNo % 90 == 0 and (EX.hostHasAi() and P.pose ~= nil) then
+    if frameNo % 90 == 0 and (EX.hostHasAi() and P.pose ~= nil and not P.softHide) then
         log("AI NPCs present on the host: switching the other player's body to the game's own animation")
         destroyPuppet()
         return true
@@ -1461,6 +1475,10 @@ local function updatePuppet(v)
     if selfTest ~= "" and frameNo % 450 == 0 then
         log(string.format("held debug: flags %d, remote R parts %d/%d", flags, #remoteHeld.R.parts, remoteHeld.R.n))
     end
+    if EX.remoteLook then
+        local okD, eD = pcall(EX.dress, puppet, P.pose or P.mesh, EX.remoteLook)
+        if not okD and frameNo % 300 == 0 then log("dress error: " .. tostring(eD)) end
+    end
     local okL, eL = pcall(EX.updateRemoteLights, v)
     if not okL and frameNo % 300 == 0 then log("remote lights error: " .. tostring(eL)) end
 
@@ -1486,6 +1504,7 @@ local function puppetDie()
     puppetDead = true
     destroyHeld()
     pcall(EX.hideRemoteLights)
+    if valid(puppet) and pup then pcall(EX.dressMaster, puppet, pup.mesh) end
     if valid(puppet) then
         log("other player died: ragdolling their body")
         -- show the real (gore-painted) NPC mesh for the ragdoll
@@ -1999,7 +2018,11 @@ function EX.onProp(path, x, y, z, qx, qy, qz, qw, vx, vy, vz)
 end
 
 function EX.tick()
-    if status.state ~= "Connected" then return end
+    if status.state ~= "Connected" then EX.lookSentAt = nil return end
+    if not EX.lookSentAt or frameNo - EX.lookSentAt > 1800 then
+        EX.lookSentAt = frameNo
+        sendGame("look " .. EX.lookStr)
+    end
     if frameNo % 15 == 0 then pcall(EX.readVision) end
     if not syncActive() then return end
     local ok, err = pcall(EX.grabTick)
@@ -2576,6 +2599,416 @@ function EX.spectateTick(myDead)
     end
 end
 
+-- generated from the game's file list (character customisation)
+EX.WARDROBE = {
+    top = {
+        { name = "None" },
+        { name = "Hoodie", mesh = "/Game/characters/Human/CharacterAssets/HumanSkeleton/Meshes/Clothes/Clothes_Hoodie_01.Clothes_Hoodie_01", colours = { { "Blue", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Hoodie_Blue.M_NPC_Clothes_Hoodie_Blue" }, { "Camo 1", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Hoodie_Camo_1.M_NPC_Clothes_Hoodie_Camo_1" }, { "Camo 3", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Hoodie_Camo_3.M_NPC_Clothes_Hoodie_Camo_3" }, { "Charcoal", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Hoodie_Charcoal.M_NPC_Clothes_Hoodie_Charcoal" }, { "Green", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Hoodie_Green.M_NPC_Clothes_Hoodie_Green" }, { "Grey", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Hoodie_Grey.M_NPC_Clothes_Hoodie_Grey" }, { "Red", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Hoodie_Red.M_NPC_Clothes_Hoodie_Red" }, { "White", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Hoodie_White.M_NPC_Clothes_Hoodie_White" } } },
+        { name = "Tank top", mesh = "/Game/characters/Human/CharacterAssets/HumanSkeleton/Meshes/Clothes/Clothes_TankTop_01.Clothes_TankTop_01", colours = { { "Blue", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_TankTop_Blue.M_NPC_Clothes_TankTop_Blue" }, { "Camo 1", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_TankTop_Camo_1.M_NPC_Clothes_TankTop_Camo_1" }, { "Camo 2", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_TankTop_Camo_2.M_NPC_Clothes_TankTop_Camo_2" }, { "Camo 3", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_TankTop_Camo_3.M_NPC_Clothes_TankTop_Camo_3" }, { "Green", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_TankTop_Green.M_NPC_Clothes_TankTop_Green" }, { "Grey", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_TankTop_Grey.M_NPC_Clothes_TankTop_Grey" }, { "Red", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_TankTop_Red.M_NPC_Clothes_TankTop_Red" }, { "White", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_TankTop_White.M_NPC_Clothes_TankTop_White" }, { "Yellow", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_TankTop_Yellow.M_NPC_Clothes_TankTop_Yellow" } } },
+        { name = "Long sleeve", mesh = "/Game/characters/Human/CharacterAssets/HumanSkeleton/Meshes/Clothes/skm_Clothes_Shirt_LS_1_02.skm_Clothes_Shirt_LS_1_02", colours = { { "1 Scorch", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Shirt_LS_1_Scorch.M_NPC_Shirt_LS_1_Scorch" }, { "Blue 1", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Shirt_LS_Blue_1.M_NPC_Shirt_LS_Blue_1" }, { "Brown", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Shirt_LS_Brown.M_NPC_Shirt_LS_Brown" }, { "Camo 1", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Shirt_LS_Camo_1.M_NPC_Shirt_LS_Camo_1" }, { "Camo 2", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Shirt_LS_Camo_2.M_NPC_Shirt_LS_Camo_2" }, { "Camo 3", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Shirt_LS_Camo_3.M_NPC_Shirt_LS_Camo_3" }, { "Camo 4", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Shirt_LS_Camo_4.M_NPC_Shirt_LS_Camo_4" }, { "Gray", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Shirt_LS_Gray.M_NPC_Shirt_LS_Gray" }, { "Green 1", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Shirt_LS_Green_1.M_NPC_Shirt_LS_Green_1" }, { "LiteGray", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Shirt_LS_LiteGray.M_NPC_Shirt_LS_LiteGray" }, { "Red", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Shirt_LS_Red.M_NPC_Shirt_LS_Red" }, { "White Dirty", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Shirt_LS_White_Dirty.M_NPC_Shirt_LS_White_Dirty" } } },
+    },
+    bottom = {
+        { name = "None" },
+        { name = "Cargo shorts", mesh = "/Game/characters/Human/CharacterAssets/HumanSkeleton/Meshes/Clothes/Clothes_CargoShorts_01.Clothes_CargoShorts_01", colours = { { "Blue", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_CargoShorts_Blue.M_NPC_Clothes_CargoShorts_Blue" }, { "Camo", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_CargoShorts_Camo.M_NPC_Clothes_CargoShorts_Camo" }, { "Camo 2", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_CargoShorts_Camo_2.M_NPC_Clothes_CargoShorts_Camo_2" }, { "Camo 3", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_CargoShorts_Camo_3.M_NPC_Clothes_CargoShorts_Camo_3" }, { "Camo 4", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_CargoShorts_Camo_4.M_NPC_Clothes_CargoShorts_Camo_4" }, { "Camo Green", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_CargoShorts_Camo_Green.M_NPC_Clothes_CargoShorts_Camo_Green" }, { "Gray", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_CargoShorts_Gray.M_NPC_Clothes_CargoShorts_Gray" }, { "Green", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_CargoShorts_Green.M_NPC_Clothes_CargoShorts_Green" }, { "Tan", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_CargoShorts_Tan.M_NPC_Clothes_CargoShorts_Tan" }, { "Tan 2", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_CargoShorts_Tan_2.M_NPC_Clothes_CargoShorts_Tan_2" } } },
+        { name = "Jeans", mesh = "/Game/characters/Human/CharacterAssets/HumanSkeleton/Meshes/Clothes/skm_Clothes_Pants_Jeans_01.skm_Clothes_Pants_Jeans_01", colours = { { "3", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Pants_Jeans_3.M_NPC_Pants_Jeans_3" }, { "4", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Pants_Jeans_4.M_NPC_Pants_Jeans_4" }, { "5", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Pants_Jeans_5.M_NPC_Pants_Jeans_5" }, { "6", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Pants_Jeans_6.M_NPC_Pants_Jeans_6" }, { "Brown 1", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Pants_Jeans_Brown_1.M_NPC_Pants_Jeans_Brown_1" } } },
+    },
+    shoes = {
+        { name = "None" },
+        { name = "Sneakers", mesh = "/Game/characters/Human/CharacterAssets/HumanSkeleton/Meshes/Clothes/Clothes_Shoes_Sneakers_01_Base.Clothes_Shoes_Sneakers_01_Base", colours = { { "Black", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Shoes_Sneakers_Black.M_NPC_Shoes_Sneakers_Black" }, { "Blue 1", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Shoes_Sneakers_Blue_1.M_NPC_Shoes_Sneakers_Blue_1" }, { "Brown", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Shoes_Sneakers_Brown.M_NPC_Shoes_Sneakers_Brown" }, { "White", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Shoes_Sneakers_White.M_NPC_Shoes_Sneakers_White" } } },
+    },
+    hat = {
+        { name = "None" },
+        { name = "Beanie", mesh = "/Game/characters/Human/CharacterAssets/HumanSkeleton/Meshes/Clothes/Clothes_Hat_Beanie_01.Clothes_Hat_Beanie_01", colours = { { "Black", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Beanie_Black.M_NPC_Clothes_Beanie_Black" }, { "Brown", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Beanie_Brown.M_NPC_Clothes_Beanie_Brown" }, { "Camo 1", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Beanie_Camo_1.M_NPC_Clothes_Beanie_Camo_1" }, { "Camo 2", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Beanie_Camo_2.M_NPC_Clothes_Beanie_Camo_2" }, { "Camo 3", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Beanie_Camo_3.M_NPC_Clothes_Beanie_Camo_3" }, { "Camo 4", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Beanie_Camo_4.M_NPC_Clothes_Beanie_Camo_4" }, { "Camo 5", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Beanie_Camo_5.M_NPC_Clothes_Beanie_Camo_5" }, { "Green", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Beanie_Green.M_NPC_Clothes_Beanie_Green" }, { "Green 2", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Beanie_Green_2.M_NPC_Clothes_Beanie_Green_2" }, { "Green 3", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Beanie_Green_3.M_NPC_Clothes_Beanie_Green_3" }, { "HunterOrange", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Beanie_HunterOrange.M_NPC_Clothes_Beanie_HunterOrange" }, { "HunterOrange Camo", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Beanie_HunterOrange_Camo.M_NPC_Clothes_Beanie_HunterOrange_Camo" }, { "White", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Beanie_White.M_NPC_Clothes_Beanie_White" }, { "Yellow", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Beanie_Yellow.M_NPC_Clothes_Beanie_Yellow" } } },
+        { name = "Cap", mesh = "/Game/characters/Human/CharacterAssets/HumanSkeleton/Meshes/Clothes/Clothes_Hat_Cap_01.Clothes_Hat_Cap_01", colours = { { "Black", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_Black.M_NPC_Clothes_Cap_Black" }, { "Brown", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_Brown.M_NPC_Clothes_Cap_Brown" }, { "Brown 2", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_Brown_2.M_NPC_Clothes_Cap_Brown_2" }, { "Brown 3", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_Brown_3.M_NPC_Clothes_Cap_Brown_3" }, { "Camo 1", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_Camo_1.M_NPC_Clothes_Cap_Camo_1" }, { "Camo 2", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_Camo_2.M_NPC_Clothes_Cap_Camo_2" }, { "Camo 3", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_Camo_3.M_NPC_Clothes_Cap_Camo_3" }, { "Green 1", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_Green_1.M_NPC_Clothes_Cap_Green_1" }, { "Grey", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_Grey.M_NPC_Clothes_Cap_Grey" }, { "HunterOrange", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_HunterOrange.M_NPC_Clothes_Cap_HunterOrange" }, { "White", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_White.M_NPC_Clothes_Cap_White" } } },
+    },
+    hair = { { name = "None" }, { name = "Messy", mesh = "/Game/characters/Human/CharacterAssets/HumanSkeleton/Meshes/Hair/skm_Hair_Med_Messy.skm_Hair_Med_Messy" } },
+}
+------------------------------------------------------------------------------- character customisation
+-- Your look = top, bottom, shoes, hat, hair (each with a colour) + a name effect. It is chosen in
+-- the F9 window's CHARACTER menu (live 3D preview rendered by this game), saved, and sent to the
+-- other player, whose game dresses your body in the game's own clothing meshes and colours.
+-- look string: "top topC bottom bottomC shoes shoesC hat hatC hair fx" (1-based; hat/hair 1 = none)
+EX.NAME_FX = { "Classic", "Rainbow", "Sunset", "Fire", "Ice", "Gold", "Toxic", "Pulse", "Glitch", "Wave" }
+EX.DEFAULT_LOOK = "3 8 2 9 1 1 1 1 2 1"
+EX.SLOTS = { "top", "bottom", "shoes", "hat", "hair" }
+local LOOK_FILE = modDir .. "\\look.txt"
+
+function EX.parseLook(s)
+    local v = {}
+    for n in tostring(s or ""):gmatch("%d+") do v[#v + 1] = tonumber(n) end
+    if #v < 10 then v = {} for n in EX.DEFAULT_LOOK:gmatch("%d+") do v[#v + 1] = tonumber(n) end end
+    return { top = v[1], topC = v[2], bottom = v[3], bottomC = v[4], shoes = v[5], shoesC = v[6], hat = v[7], hatC = v[8], hair = v[9], fx = v[10] }
+end
+
+function EX.loadLook()
+    local f = io.open(LOOK_FILE, "r")
+    local s = f and f:read("*l") or nil
+    if f then f:close() end
+    local nums = 0
+    if s then for _ in s:gmatch("%d+") do nums = nums + 1 end end
+    EX.lookStr = nums >= 10 and s:match("^%s*(.-)%s*$") or EX.DEFAULT_LOOK
+    EX.look = EX.parseLook(EX.lookStr)
+end
+function EX.saveLook()
+    pcall(function() local f = io.open(LOOK_FILE, "w") if f then f:write(EX.lookStr, "\n") f:close() end end)
+end
+pcall(EX.loadLook)
+
+-- catalogue lines for the window: "CAT <slot> <idx> <item>|<colour>;<colour>..."
+function EX.catalogueLines()
+    local out = {}
+    for _, slot in ipairs(EX.SLOTS) do
+        for i, it in ipairs(EX.WARDROBE[slot]) do
+            local cs = {}
+            for _, c in ipairs(it.colours or {}) do cs[#cs + 1] = c[1] end
+            out[#out + 1] = string.format("CAT %s %d %s|%s", slot, i, it.name, table.concat(cs, ";"))
+        end
+    end
+    out[#out + 1] = "CAT fx 0 " .. table.concat(EX.NAME_FX, ";")
+    return out
+end
+
+local SKEL_CLS = "/Script/Engine.SkeletalMeshComponent"
+EX.dressed = {}    -- actor full name -> { holder, comps = { slot = comp }, look = str, master }
+
+-- Dress `actor` (an NPC body) in `lookStr`; the clothes follow `master` (the visible skinned mesh).
+-- The clothes live on their own holder actor, never on the NPC itself (the game's NPC code does
+-- not cope with extra components on its bodies - see the 0.6.0 host crash).
+function EX.dress(actor, master, lookStr)
+    if not valid(actor) or not valid(master) then return end
+    local key = actor:GetFullName()
+    local d = EX.dressed[key]
+    if d and d.look == lookStr and d.master == master and valid(d.holder) and not (d.failed and frameNo - d.failedAt > 90) then
+        if frameNo % 60 == 0 then pcall(function() actor.Costume:SetVisibility(false, false) actor.hair:SetVisibility(false, false) end) end
+        return
+    end
+    if not d or not valid(d.holder) then
+        local h = spawnActor("/Script/Engine.Actor")
+        if not h then return end
+        d = { holder = h, comps = {} }
+        EX.dressed[key] = d
+    end
+    d.look, d.master = lookStr, master
+    local failed = false
+    local L = EX.parseLook(lookStr)
+    -- the NPC's own merged outfit and hair are replaced by the chosen pieces
+    pcall(function() actor.Costume:SetVisibility(false, false) end)
+    pcall(function() actor.hair:SetVisibility(false, false) end)
+    local picks = { top = { L.top, L.topC }, bottom = { L.bottom, L.bottomC }, shoes = { L.shoes, L.shoesC }, hat = { L.hat, L.hatC }, hair = { L.hair, 1 } }
+    for _, slot in ipairs(EX.SLOTS) do
+        local it = EX.WARDROBE[slot][picks[slot][1]] or EX.WARDROBE[slot][1]
+        local comp = d.comps[slot]
+        if not it.mesh then
+            if valid(comp) then pcall(function() comp:SetVisibility(false, false) end) end
+        else
+            local ok, err = pcall(function()
+                if not valid(comp) then
+                    comp = d.holder:AddComponentByClass(StaticFindObject(SKEL_CLS), false,
+                        { Rotation = { X = 0, Y = 0, Z = 0, W = 1 }, Translation = { X = 0, Y = 0, Z = 0 }, Scale3D = { X = 1, Y = 1, Z = 1 } }, false)
+                    d.comps[slot] = comp
+                end
+                local mesh = findAsset(it.mesh)
+                if not mesh then error("mesh not available: " .. it.mesh) end
+                comp:K2_AttachToComponent(master, FName("None"), 2, 2, 2, true)
+                comp:SetSkeletalMesh(mesh, true)
+                comp:SetMasterPoseComponent(master, true)
+                comp:SetCollisionEnabled(0)
+                comp:SetVisibility(true, false)
+                local c = it.colours and (it.colours[picks[slot][2]] or it.colours[1])
+                if c then
+                    local mat = findAsset(c[2])
+                    if mat then comp:SetMaterial(0, mat) end
+                    if slot == "shoes" then   -- sneakers: second material slot uses the "_B" variant
+                        local pkg, nm = c[2]:match("^(.*)%.([^.]+)$")
+                        local matB = pkg and findAsset(pkg .. "_B." .. nm .. "_B")
+                        if matB then comp:SetMaterial(1, matB) end
+                    end
+                end
+            end)
+            if not ok then
+                failed = true
+                if EX.dressErr ~= tostring(err) then EX.dressErr = tostring(err) log("dressing failed (" .. slot .. "): " .. tostring(err)) end
+            end
+        end
+    end
+    d.failed, d.failedAt = failed, frameNo
+end
+
+-- (a failed piece is retried: see the end of EX.dress)
+function EX.undress(actor)
+    if not actor then return end
+    local ok, key = pcall(function() return actor:GetFullName() end)
+    local d = ok and EX.dressed[key]
+    if d and valid(d.holder) then pcall(function() d.holder:K2_DestroyActor() end) end
+    if ok then EX.dressed[key] = nil end
+end
+
+-- re-attach the clothes to another master (the ragdoll mesh when the player dies)
+function EX.dressMaster(actor, master)
+    local ok, key = pcall(function() return actor:GetFullName() end)
+    local d = ok and EX.dressed[key]
+    if not d then return end
+    d.master = master
+    for _, comp in pairs(d.comps) do
+        pcall(function() comp:K2_AttachToComponent(master, FName("None"), 2, 2, 2, true) comp:SetMasterPoseComponent(master, true) end)
+    end
+end
+
+------------------------------------------------------------------------------- live 3D preview
+-- While the CHARACTER menu is open, a dressed copy of you stands in a lit studio far below the map;
+-- a scene capture photographs it ~15 times a second into preview.png, which the window shows.
+-- Dragging in the window turns the model.
+EX.PREVIEW_FILE = "preview.png"
+function EX.previewTick(open, yaw)
+    if not open then
+        if EX.pv then
+            for _, k in ipairs({ "npc", "cam", "key", "rim", "fill", "stage" }) do
+                if valid(EX.pv[k]) then pcall(function() EX.pv[k]:K2_DestroyActor() end) end
+            end
+            EX.undress(EX.pv.npc)
+            EX.pv = nil
+        end
+        return
+    end
+    local pv = EX.pv
+    if not pv then
+        pv = {}
+        EX.pv = pv
+        local x, y, z = localHead[1], localHead[2], localHead[3] + 25000   -- a studio high above the map
+        pv.x, pv.y, pv.z = x, y, z
+        local ok, a = pcall(spawnPuppet, x, y, z + 90, 0, false)
+        if not ok or not a then log("preview: could not spawn the model") EX.pv = nil return end
+        pv.npc = a
+        pcall(function() a.CapsuleComponent:SetCollisionEnabled(0) end)
+        -- stand still in the game's neutral pose (the NPC's own animation plays a long-fall flail up here)
+        pcall(function()
+            local anim = findAsset("/Game/characters/Human/CharacterAssets/HumanSkeleton/Animations/Base/BasePoses/Human_N_Pose.Human_N_Pose")
+            if anim then a.Mesh:SetAnimationMode(1) a.Mesh:PlayAnimation(anim, true) end
+        end)
+        local cam = spawnActor("/Script/Engine.SceneCapture2D")
+        pv.cam = cam
+        pcall(function()
+            local krl = StaticFindObject("/Script/Engine.Default__KismetRenderingLibrary")
+            pv.krl = krl
+            pv.rt = krl:CreateRenderTarget2D(getWorld(), 420, 640, 2, { R = 0, G = 0, B = 0, A = 1 }, false)
+            local cc = cam.CaptureComponent2D
+            cc.TextureTarget = pv.rt
+            cc.bCaptureEveryFrame = false
+            cc.bCaptureOnMovement = false
+            cc.FOVAngle = 17
+            cc.CaptureSource = 2              -- final colour (lit, tone mapped)
+            pv.cc = cc
+        end)
+        -- studio lights: warm key light from the front, red rim light behind (BloodTrail colours)
+        local key, kc = lightActor("/Script/Engine.PointLight", "PointLightComponent")
+        pv.key = key
+        pcall(function() kc:SetIntensity(60000) kc:SetAttenuationRadius(1500) kc:SetLightColor({ R = 1, G = 0.93, B = 0.85, A = 1 }, true) end)
+        local rim, rc = lightActor("/Script/Engine.PointLight", "PointLightComponent")
+        pv.rim = rim
+        pcall(function() rc:SetIntensity(40000) rc:SetAttenuationRadius(1200) rc:SetLightColor({ R = 1, G = 0.1, B = 0.08, A = 1 }, true) end)
+        pcall(function() key:K2_SetActorLocation({ X = x + 260, Y = y + 120, Z = z + 230 }, false, {}, true) end)
+        pcall(function() rim:K2_SetActorLocation({ X = x - 180, Y = y - 60, Z = z + 200 }, false, {}, true) end)
+        -- a dark round stage to stand on (without a floor the model plays its falling animation)
+        pv.stage = meshActor("/Engine/BasicShapes/Cylinder.Cylinder", 2.2, 2.2, 0.06, 0.06, 0.02, 0.02)
+        pcall(function() pv.stage:K2_SetActorLocation({ X = x, Y = y, Z = z - 3 }, false, {}, true) end)
+        pcall(function() pv.stage.StaticMeshComponent:SetCollisionEnabled(3) end)
+        local fill, fc = lightActor("/Script/Engine.PointLight", "PointLightComponent")
+        pv.fill = fill
+        pcall(function() fc:SetIntensity(25000) fc:SetAttenuationRadius(1200) end)
+        pcall(function() fill:K2_SetActorLocation({ X = x + 200, Y = y - 220, Z = z + 120 }, false, {}, true) end)
+        pcall(function() cam:K2_SetActorLocationAndRotation({ X = x + 600, Y = y, Z = z + 100 }, { Pitch = -2, Yaw = 180, Roll = 0 }, false, {}, true) end)
+        log("character preview opened")
+    end
+    if not valid(pv.npc) then EX.pv = nil return end
+    pcall(function()
+        pv.npc:K2_SetActorLocationAndRotation({ X = pv.x, Y = pv.y, Z = pv.z + 90 }, { Pitch = 0, Yaw = yaw, Roll = 0 }, false, {}, true)
+    end)
+    pcall(EX.dress, pv.npc, pv.npc.Mesh, EX.lookStr)
+    if frameNo % 6 == 0 and pv.cc and pv.rt then
+        local ok, err = pcall(function()
+            pv.cc:CaptureScene()
+            pv.krl:ExportRenderTarget(getWorld(), pv.rt, modDir .. "\\", EX.PREVIEW_FILE)
+        end)
+        if not ok and not pv.warned then pv.warned = true log("preview capture failed: " .. tostring(err)) end
+    end
+end
+
+------------------------------------------------------------------------------- name effects
+-- The other player's name floats above them letter by letter, coloured by their chosen effect.
+local function hsv(h, s, v)
+    h = (h % 1) * 6
+    local i = math.floor(h)
+    local f = h - i
+    local p, q, t = v * (1 - s), v * (1 - s * f), v * (1 - s * (1 - f))
+    local rgb = ({ { v, t, p }, { q, v, p }, { p, v, t }, { p, q, v }, { t, p, v }, { v, p, q } })[i + 1] or { v, v, v }
+    local r, g, b = rgb[1], rgb[2], rgb[3]
+    return math.floor(r * 255), math.floor(g * 255), math.floor(b * 255)
+end
+EX.hsv = hsv
+
+-- colour of letter i (of n) at time t for effect fx; returns r, g, b, dz (vertical offset, cm), jx
+function EX.fxColour(fx, i, n, t)
+    local u = n > 1 and (i - 1) / (n - 1) or 0
+    if fx == 2 then local r, g, b = hsv(t * 0.25 + u * 0.6, 0.85, 1) return r, g, b, 0, 0
+    elseif fx == 3 then  -- sunset gradient drifting along the name
+        local k = (u + t * 0.15) % 1
+        local a = { { 255, 140, 40 }, { 255, 60, 120 }, { 150, 60, 255 }, { 255, 140, 40 } }
+        local s = k * 3
+        local j = math.floor(s) + 1
+        local f = s - math.floor(s)
+        local c1, c2 = a[j], a[j + 1]
+        return math.floor(c1[1] + (c2[1] - c1[1]) * f), math.floor(c1[2] + (c2[2] - c1[2]) * f), math.floor(c1[3] + (c2[3] - c1[3]) * f), 0, 0
+    elseif fx == 4 then  -- fire: flickering red-orange-yellow
+        local f = math.random()
+        return 255, math.floor(60 + 170 * f * (0.6 + 0.4 * math.sin(t * 9 + i))), math.floor(20 * f), 0, 0
+    elseif fx == 5 then  -- ice: cold shimmer
+        local s = 0.5 + 0.5 * math.sin(t * 3 + i * 0.9)
+        return math.floor(120 + 135 * s), math.floor(210 + 45 * s), 255, 0, 0
+    elseif fx == 6 then  -- gold with a white highlight sweeping across
+        local sweep = math.max(0, 1 - math.abs(((t * 0.6) % 1.6) - 0.3 - u) * 5)
+        return 255, math.floor(190 + 65 * sweep), math.floor(40 + 215 * sweep), 0, 0
+    elseif fx == 7 then  -- toxic green pulse
+        local s = 0.5 + 0.5 * math.sin(t * 4 - u * 4)
+        return math.floor(80 + 100 * s), 255, math.floor(40 + 60 * s), 0, 0
+    elseif fx == 8 then  -- blood-red pulse
+        local s = 0.5 + 0.5 * math.sin(t * 5)
+        return math.floor(150 + 105 * s), math.floor(20 * s), math.floor(20 * s), 0, 0
+    elseif fx == 9 then  -- glitch: white, letters jump and flash
+        if math.random() < 0.08 then local r, g, b = hsv(math.random(), 1, 1) return r, g, b, (math.random() - 0.5) * 3, (math.random() - 0.5) * 2 end
+        return 235, 235, 235, 0, 0
+    elseif fx == 10 then  -- wave: rainbow letters bobbing
+        local r, g, b = hsv(t * 0.2 + u * 0.5, 0.75, 1)
+        return r, g, b, math.sin(t * 5 - i * 0.7) * 2.2, 0
+    end
+    return 235, 225, 215, 0, 0
+end
+
+EX.letters = {}
+function EX.nameFxTick(v, name, yaw)
+    local fx = EX.remoteLook and EX.parseLook(EX.remoteLook).fx or 1
+    local show = fx > 1 and EX.settings.tags and not puppetDead and avatar and not avatar.hidden
+    name = tostring(name or "Player"):sub(1, 16)
+    if not show then
+        for _, a in ipairs(EX.letters) do if valid(a) then pcall(function() a:SetActorHiddenInGame(true) end) end end
+        EX.lettersShown = false
+        return false
+    end
+    if EX.lettersName ~= name or #EX.letters ~= #name or not valid(EX.letters[1]) then
+        for _, a in ipairs(EX.letters) do if valid(a) then pcall(function() a:K2_DestroyActor() end) end end
+        EX.letters = {}
+        for i = 1, #name do EX.letters[i] = textActor(name:sub(i, i), 10, 235, 225, 215) end
+        EX.lettersName = name
+    end
+    local t = os.clock()
+    local ry = yaw * DEG
+    local rx, rY = -math.sin(ry), math.cos(ry)
+    local n = #EX.letters
+    local w = 5.4
+    for i, a in ipairs(EX.letters) do
+        if valid(a) then
+            local r, g, b, dz, jx = EX.fxColour(fx, i, n, t)
+            local off = (i - (n + 1) / 2) * w + (jx or 0)
+            -- letters face the viewer; the text's own right is -right of the facing yaw
+            a:K2_SetActorLocationAndRotation({ X = v[1] - rx * off, Y = v[2] - rY * off, Z = v[3] + 34 + (dz or 0) },
+                { Pitch = 0, Yaw = yaw, Roll = 0 }, false, {}, true)
+            pcall(function() a.TextRender:SetTextRenderColor({ R = r, G = g, B = b, A = 255 }) end)
+            if not EX.lettersShown then pcall(function() a:SetActorHiddenInGame(false) end) end
+        end
+    end
+    EX.lettersShown = true
+    return true
+end
+
+------------------------------------------------------------------------------- third person
+-- Over-the-right-shoulder view (toggle in the F9 window). A dressed copy of you (your look) stands
+-- where you stand and walks with you; the view moves behind your right shoulder. In VR the headset
+-- still turns the view: the camera's position is set so that, after the game adds your headset's
+-- own movement, the eye ends up behind your shoulder.
+function EX.thirdTick()
+    local want = EX.thirdPerson and not EX.spectating and not EX.myDead
+    local pc = getPC()
+    local pawn = getPawn()
+    if EX.thirdPerson and not (want and pc and pawn) and selfTest ~= "" and not EX.tpWhyLogged then
+        EX.tpWhyLogged = true
+        log(string.format("third person waiting: spectating=%s dead=%s pc=%s pawn=%s", tostring(EX.spectating), tostring(EX.myDead), tostring(pc ~= nil), tostring(pawn ~= nil)))
+    end
+    if not want or not pc then
+        if EX.tp then
+            if EX.tp.active and pawn and pc then pcall(function() pc:SetViewTargetWithBlend(pawn, 0.35, 4, 2, false) end) end
+            for _, k in ipairs({ "cam", "body" }) do if valid(EX.tp[k]) then pcall(function() EX.tp[k]:K2_DestroyActor() end) end end
+            EX.undress(EX.tp.body)
+            EX.tp = nil
+        end
+        return
+    end
+    local tp = EX.tp
+    if not tp then
+        tp = {}
+        EX.tp = tp
+    end
+    local _, headYaw = quatToRot(headQuat[1], headQuat[2], headQuat[3], headQuat[4])
+    -- with a VR pawn: its origin is the floor and the headset offset is added by the camera; without
+    -- one (desktop tests), use the view position directly
+    local pl, pr
+    if pawn then
+        pl, pr = pawn:K2_GetActorLocation(), pawn:K2_GetActorRotation()
+    else
+        pl, pr = { X = localHead[1], Y = localHead[2], Z = localHead[3] - 165 }, { Yaw = headYaw }
+    end
+    -- your body
+    if not valid(tp.body) then
+        local ok, a, ctrl = pcall(spawnPuppet, localHead[1], localHead[2], pl.Z + 90, headYaw, false)
+        if not ok or not a then return end
+        tp.body, tp.ctrl = a, ctrl
+        pcall(function() a:BPI_Set_RotationMode(1) end)
+        pcall(function() a.DesiredRotationMode = 1 a.RotationMode = 1 end)
+        tp.cm = a.CharacterMovement
+    end
+    local by = headYaw * DEG
+    local bx, byy = localHead[1] - math.cos(by) * 10, localHead[2] - math.sin(by) * 10
+    pcall(function()
+        tp.body:K2_SetActorLocation({ X = bx, Y = byy, Z = pl.Z + 90 }, false, {}, true)
+        if tp.ctrl then tp.ctrl:SetControlRotation({ Pitch = 0, Yaw = headYaw, Roll = 0 }) end
+        local now = os.clock()
+        if tp.lx then
+            local dt = math.max(1e-3, now - tp.lt)
+            local vx, vy = (localHead[1] - tp.lx) / dt, (localHead[2] - tp.ly) / dt
+            tp.vx = (tp.vx or 0) * 0.85 + vx * 0.15
+            tp.vy = (tp.vy or 0) * 0.85 + vy * 0.15
+            local sp = math.sqrt(tp.vx ^ 2 + tp.vy ^ 2)
+            local wx, wy = tp.vx, tp.vy
+            if sp < 25 then wx, wy, sp = 0, 0, 0 end
+            tp.cm.Velocity = { X = wx, Y = wy, Z = 0 }
+            tp.cm.Acceleration = sp > 0 and { X = wx / sp * 1500, Y = wy / sp * 1500, Z = 0 } or { X = 0, Y = 0, Z = 0 }
+        end
+        tp.lx, tp.ly, tp.lt = localHead[1], localHead[2], now
+        syncMovementBase(tp.body, tp.cm)
+    end)
+    pcall(EX.dress, tp.body, tp.body.Mesh, EX.lookStr)
+    -- camera behind the right shoulder (smoothed)
+    if not valid(tp.cam) then
+        tp.cam = spawnActor("/Script/Engine.CameraActor")
+        if not tp.cam then return end
+        tp.active = false
+    end
+    local fx, fy = math.cos(by), math.sin(by)
+    local rx, ry = -fy, fx
+    -- target eye position minus the headset's offset from the pawn (the game adds it back)
+    local tx = pl.X + (-fx * 170 + rx * 45)
+    local ty = pl.Y + (-fy * 170 + ry * 45)
+    local tz = pl.Z + 15
+    if not pawn then tx, ty, tz = localHead[1] - fx * 170 + rx * 45, localHead[2] - fy * 170 + ry * 45, localHead[3] + 15 end
+    local c = tp.pos or { tx, ty, tz }
+    c = { c[1] + (tx - c[1]) * 0.2, c[2] + (ty - c[2]) * 0.2, c[3] + (tz - c[3]) * 0.2 }
+    tp.pos = c
+    pcall(function() tp.cam:K2_SetActorLocationAndRotation({ X = c[1], Y = c[2], Z = c[3] }, { Pitch = pawn and 0 or -8, Yaw = pawn and pr.Yaw or headYaw, Roll = 0 }, false, {}, true) end)
+    if not tp.active then
+        tp.active = true
+        pcall(function() pc:SetViewTargetWithBlend(tp.cam, 0.5, 4, 2, false) end)
+        log("third person view on")
+    end
+end
+
 ------------------------------------------------------------------------------- watch: status + hologram menu
 -- Look at your raised left hand: a status hologram (who, ping, health) appears above the watch.
 -- Tap the watch with your right hand: a holographic settings menu opens above it. Touch an entry
@@ -2873,6 +3306,13 @@ local function handleGame(line)
         handleNpcEvent(kind, rest)
     elseif kind == "hp" then
         remoteHealth = tonumber(rest) or remoteHealth
+    elseif kind == "look" then
+        local nums = 0
+        for _ in rest:gmatch("%d+") do nums = nums + 1 end
+        if nums >= 10 and rest ~= EX.remoteLook then
+            EX.remoteLook = rest
+            log("other player's look: " .. rest)
+        end
     elseif kind == "score" then
         local k, h, d = rest:match("^(%d+) (%d+) (%d+)")
         if k then EX.score.them = { k = tonumber(k), h = tonumber(h), d = tonumber(d) } end
@@ -2943,6 +3383,24 @@ local function parseReply(reply)
                     if not ok then log("avatar update failed: " .. tostring(err)) avatarDisabled = true end
                 end
             end
+        elseif kind == "CM" then
+            -- CM <open 0/1> <yaw> <look...>: the window's character menu
+            local open, yaw, third, look = line:match("^CM (%d) (%S+) (%d) ?(.*)$")
+            if open then
+                EX.charOpen, EX.charYaw = open == "1", tonumber(yaw) or 0
+                EX.thirdPerson = third == "1"
+                -- developer self-tests: force the preview / third person / dress the other player
+                if selfTest:find("preview", 1, true) then EX.charOpen = true EX.charYaw = (frameNo * 0.5) % 360 end
+                if selfTest:find("third", 1, true) then EX.thirdPerson = true end
+                if selfTest:find("dressbot", 1, true) then EX.remoteLook = "2 3 3 2 2 2 2 4 2 3" end
+                local nums = 0
+                for _ in (look or ""):gmatch("%d+") do nums = nums + 1 end
+                if nums >= 10 and look ~= EX.lookStr then
+                    EX.lookStr, EX.look = look, EX.parseLook(look)
+                    EX.saveLook()
+                    EX.lookSentAt = nil      -- send it to the other player now
+                end
+            end
         elseif kind == "GX" then
             local ok, err = pcall(handleGame, line:sub(4))
             if not ok then log("game event failed: " .. tostring(err)) end
@@ -2976,6 +3434,10 @@ local function frame()
     if not handshakeDone then
         req[#req + 1] = "H " .. VERSION
         handshakeDone = true
+        pcall(function()
+            for _, l in ipairs(EX.catalogueLines()) do req[#req + 1] = l end
+            req[#req + 1] = "LOOK " .. EX.lookStr
+        end)
     end
     local okPose, poseLine = pcall(readLocalPose)
     if okPose and poseLine then req[#req + 1] = poseLine end
@@ -3031,6 +3493,49 @@ local function frame()
             end)
         end
     end
+    -- developer self-test: how do clothing meshes load? (logs only)
+    if selfTest:find("meshprobe", 1, true) and frameNo == 700 then
+        local path = "/Game/characters/Human/CharacterAssets/HumanSkeleton/Meshes/Clothes/Clothes_Hoodie_01.Clothes_Hoodie_01"
+        local function desc(o) if not valid(o) then return "nil" end local ok, n = pcall(function() return o:GetFullName() end) return ok and n or "?" end
+        log("meshprobe: find before = " .. desc(StaticFindObject(path)))
+        local ok1, r1 = pcall(LoadAsset, path)
+        log("meshprobe: LoadAsset(full) ok=" .. tostring(ok1) .. " -> " .. desc(r1) .. " | find = " .. desc(StaticFindObject(path)))
+        local ok2, r2 = pcall(LoadAsset, path:match("^(.-)%."))
+        log("meshprobe: LoadAsset(package) ok=" .. tostring(ok2) .. " -> " .. desc(r2) .. " | find = " .. desc(StaticFindObject(path)))
+        local okA, all = pcall(FindAllOf, "SkeletalMesh")
+        local hits = {}
+        if okA and all then for _, m in ipairs(all) do local n = desc(m) if n:find("Clothes", 1, true) then hits[#hits + 1] = n end end end
+        log("meshprobe: loaded clothing meshes: " .. (#hits > 0 and table.concat(hits, " ; ") or "none"))
+    end
+    -- developer self-test: list the game's costume tables (character customisation research)
+    if selfTest:find("costumes", 1, true) and frameNo == 900 then
+        for _, t in ipairs({ "Tops", "Bottoms", "Shoes", "Hats" }) do
+            pcall(function()
+                local path = "/Game/characters/Human/Data/DataTables/NPC_CostumePartsTable_" .. t .. "_Exp.NPC_CostumePartsTable_" .. t .. "_Exp"
+                pcall(LoadAsset, path:match("^(.-)%."))
+                local dt = StaticFindObject(path)
+                if not valid(dt) then log("costume probe: table missing " .. t) return end
+                local n = 0
+                dt:ForEachRow(function(name, row)
+                    n = n + 1
+                    if n <= 4 then
+                        local info = tostring(name)
+                        for _, how in ipairs({ "ToString", "GetAssetPathName", "Get" }) do
+                            local ok, v = pcall(function()
+                                local sp = row.Mesh_13_B3ED84F64CC78EF8A17491A5DF3BC15E
+                                if how == "ToString" then return sp:ToString() end
+                                if how == "GetAssetPathName" then return sp.SoftObjectPtr.ObjectID.AssetPathName:ToString() end
+                                return sp:Get():GetFullName()
+                            end)
+                            info = info .. " | " .. how .. "=" .. (ok and tostring(v) or ("ERR " .. tostring(v):sub(1, 60)))
+                        end
+                        log("costume probe " .. t .. ": " .. info)
+                    end
+                end)
+                log("costume probe: " .. t .. " has " .. n .. " rows")
+            end)
+        end
+    end
     -- developer self-test: shoot the first mirrored NPC (client side of NPC sync)
     if selfTest:find("npchit", 1, true) and frameNo % 450 == 0 then
         for _, m in pairs(npcActor) do
@@ -3071,6 +3576,10 @@ local function frame()
     pcall(EX.wristTick)
     pcall(EX.connectionWarning)
     pcall(EX.spectateTick, EX.myDead == true)
+    local okTP, eTP = pcall(EX.thirdTick)
+    if not okTP and frameNo % 300 == 0 then log("third person error: " .. tostring(eTP)) end
+    local okPV, ePV = pcall(EX.previewTick, EX.charOpen == true, EX.charYaw or 0)
+    if not okPV and frameNo % 300 == 0 then log("preview error: " .. tostring(ePV)) end
     if not status.simulated then
         pcall(EX.voiceTick)
         pcall(EX.subtitleTick)

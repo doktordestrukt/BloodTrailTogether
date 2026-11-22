@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(BloodTrailTogether VERSION 0.7.0 LANGUAGES CXX)
+project(BloodTrailTogether VERSION 0.8.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -48,7 +48,7 @@ add_library(btt_core SHARED
   src/bridge/lua_bridge.cpp
   src/bridge/control_window.cpp
 )
-target_link_libraries(btt_core PRIVATE btt_lib user32 gdi32 gdiplus shell32 comctl32)
+target_link_libraries(btt_core PRIVATE btt_lib user32 gdi32 gdiplus shell32 shlwapi comctl32)
 
 add_executable(btt_simpeer tools/simpeer/main.cpp)
 target_link_libraries(btt_simpeer PRIVATE btt_lib)
