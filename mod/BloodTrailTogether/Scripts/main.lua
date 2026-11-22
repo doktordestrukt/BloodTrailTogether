@@ -7,7 +7,7 @@
 -- Everything that touches the game is wrapped in pcall: a failure disables that feature and is
 -- logged to UE4SS.log / BloodTrailTogether.log instead of crashing the game.
 
-local VERSION = "0.8.0"
+local VERSION = "0.8.1"
 local TAG = "[BloodTrailTogether] "
 local UEHelpers = require("UEHelpers")
 
@@ -2622,6 +2622,15 @@ EX.WARDROBE = {
         { name = "Cap", mesh = "/Game/characters/Human/CharacterAssets/HumanSkeleton/Meshes/Clothes/Clothes_Hat_Cap_01.Clothes_Hat_Cap_01", colours = { { "Black", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_Black.M_NPC_Clothes_Cap_Black" }, { "Brown", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_Brown.M_NPC_Clothes_Cap_Brown" }, { "Brown 2", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_Brown_2.M_NPC_Clothes_Cap_Brown_2" }, { "Brown 3", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_Brown_3.M_NPC_Clothes_Cap_Brown_3" }, { "Camo 1", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_Camo_1.M_NPC_Clothes_Cap_Camo_1" }, { "Camo 2", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_Camo_2.M_NPC_Clothes_Cap_Camo_2" }, { "Camo 3", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_Camo_3.M_NPC_Clothes_Cap_Camo_3" }, { "Green 1", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_Green_1.M_NPC_Clothes_Cap_Green_1" }, { "Grey", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_Grey.M_NPC_Clothes_Cap_Grey" }, { "HunterOrange", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_HunterOrange.M_NPC_Clothes_Cap_HunterOrange" }, { "White", "/Game/characters/Human/CharacterAssets/HumanSkeleton/Materials/M_NPC_Clothes_Cap_White.M_NPC_Clothes_Cap_White" } } },
     },
     hair = { { name = "None" }, { name = "Messy", mesh = "/Game/characters/Human/CharacterAssets/HumanSkeleton/Meshes/Hair/skm_Hair_Med_Messy.skm_Hair_Med_Messy" } },
+    acc = {
+        { name = "None" },
+        { name = "Headlamp", mesh = "/Game/characters/Human/CharacterAssets/HumanSkeleton/Meshes/Accessories/skm_NPC_headlamp.skm_NPC_headlamp" },
+        { name = "Headlamp (no glass)", mesh = "/Game/characters/Human/CharacterAssets/HumanSkeleton/Meshes/Accessories/skm_NPC_Headlamp_NoGlass.skm_NPC_Headlamp_NoGlass" },
+    },
+    outfit = {
+        { name = "None" },
+        { name = "Test outfit", mesh = "/Game/characters/Human/CharacterAssets/HumanSkeleton/Meshes/Clothes/skm_NPC_test_outfit_4.skm_NPC_test_outfit_4" },
+    },
 }
 ------------------------------------------------------------------------------- character customisation
 -- Your look = top, bottom, shoes, hat, hair (each with a colour) + a name effect. It is chosen in
@@ -2629,15 +2638,17 @@ EX.WARDROBE = {
 -- other player, whose game dresses your body in the game's own clothing meshes and colours.
 -- look string: "top topC bottom bottomC shoes shoesC hat hatC hair fx" (1-based; hat/hair 1 = none)
 EX.NAME_FX = { "Classic", "Rainbow", "Sunset", "Fire", "Ice", "Gold", "Toxic", "Pulse", "Glitch", "Wave" }
-EX.DEFAULT_LOOK = "3 8 2 9 1 1 1 1 2 1"
-EX.SLOTS = { "top", "bottom", "shoes", "hat", "hair" }
+EX.DEFAULT_LOOK = "3 8 2 9 1 1 1 1 2 1 1 1"
+EX.SLOTS = { "top", "bottom", "shoes", "hat", "hair", "acc", "outfit" }
 local LOOK_FILE = modDir .. "\\look.txt"
 
 function EX.parseLook(s)
     local v = {}
     for n in tostring(s or ""):gmatch("%d+") do v[#v + 1] = tonumber(n) end
     if #v < 10 then v = {} for n in EX.DEFAULT_LOOK:gmatch("%d+") do v[#v + 1] = tonumber(n) end end
-    return { top = v[1], topC = v[2], bottom = v[3], bottomC = v[4], shoes = v[5], shoesC = v[6], hat = v[7], hatC = v[8], hair = v[9], fx = v[10] }
+    -- 0.8 looks had 10 numbers: accessory and full outfit default to none
+    return { top = v[1], topC = v[2], bottom = v[3], bottomC = v[4], shoes = v[5], shoesC = v[6], hat = v[7], hatC = v[8], hair = v[9], fx = v[10],
+             acc = v[11] or 1, outfit = v[12] or 1 }
 end
 
 function EX.loadLook()
@@ -2694,7 +2705,8 @@ function EX.dress(actor, master, lookStr)
     -- the NPC's own merged outfit and hair are replaced by the chosen pieces
     pcall(function() actor.Costume:SetVisibility(false, false) end)
     pcall(function() actor.hair:SetVisibility(false, false) end)
-    local picks = { top = { L.top, L.topC }, bottom = { L.bottom, L.bottomC }, shoes = { L.shoes, L.shoesC }, hat = { L.hat, L.hatC }, hair = { L.hair, 1 } }
+    local picks = { top = { L.top, L.topC }, bottom = { L.bottom, L.bottomC }, shoes = { L.shoes, L.shoesC }, hat = { L.hat, L.hatC }, hair = { L.hair, 1 },
+                    acc = { L.acc, 1 }, outfit = { L.outfit, 1 } }
     for _, slot in ipairs(EX.SLOTS) do
         local it = EX.WARDROBE[slot][picks[slot][1]] or EX.WARDROBE[slot][1]
         local comp = d.comps[slot]
@@ -2780,11 +2792,12 @@ function EX.previewTick(open, yaw)
         if not ok or not a then log("preview: could not spawn the model") EX.pv = nil return end
         pv.npc = a
         pcall(function() a.CapsuleComponent:SetCollisionEnabled(0) end)
-        -- stand still in the game's neutral pose (the NPC's own animation plays a long-fall flail up here)
-        pcall(function()
-            local anim = findAsset("/Game/characters/Human/CharacterAssets/HumanSkeleton/Animations/Base/BasePoses/Human_N_Pose.Human_N_Pose")
-            if anim then a.Mesh:SetAnimationMode(1) a.Mesh:PlayAnimation(anim, true) end
-        end)
+        -- A mannequin, not a live NPC: its game logic would detect the "long fall" up here and
+        -- ragdoll it (0.8.0). Actor tick off, movement off, physics off, a fixed standing pose.
+        pcall(function() a:SetActorTickEnabled(false) end)
+        pcall(function() a.CharacterMovement:Deactivate() end)
+        pv.anim = findAsset("/Game/characters/Human/CharacterAssets/HumanSkeleton/Animations/Base/BasePoses/Human_N_Pose.Human_N_Pose")
+        pcall(function() a.Mesh:SetAnimationMode(1) a.Mesh:PlayAnimation(pv.anim, true) end)
         local cam = spawnActor("/Script/Engine.SceneCapture2D")
         pv.cam = cam
         pcall(function()
@@ -2821,7 +2834,19 @@ function EX.previewTick(open, yaw)
     end
     if not valid(pv.npc) then EX.pv = nil return end
     pcall(function()
-        pv.npc:K2_SetActorLocationAndRotation({ X = pv.x, Y = pv.y, Z = pv.z + 90 }, { Pitch = 0, Yaw = yaw, Roll = 0 }, false, {}, true)
+        local mesh = pv.npc.Mesh
+        mesh:SetAllBodiesSimulatePhysics(false)
+        if mesh:GetAnimationMode() ~= 1 and pv.anim then mesh:SetAnimationMode(1) mesh:PlayAnimation(pv.anim, true) end
+        -- the mesh is attached to the capsule again if anything detached it
+        if not pv.meshFixed then
+            pv.meshFixed = true
+            pcall(function() mesh:K2_AttachToComponent(pv.npc.CapsuleComponent, FName("None"), 2, 2, 2, true) end)
+        end
+        -- feet on the stage: the mesh origin is at the feet (in 0.8.0 the model could end up below
+        -- the stage); the correction is clamped so it can never run away
+        local ml = mesh:K2_GetComponentLocation()
+        pv.zoff = math.max(40, math.min(140, (pv.zoff or 90) + (pv.z - ml.Z) * 0.3))
+        pv.npc:K2_SetActorLocationAndRotation({ X = pv.x, Y = pv.y, Z = pv.z + pv.zoff }, { Pitch = 0, Yaw = yaw, Roll = 0 }, false, {}, true)
     end)
     pcall(EX.dress, pv.npc, pv.npc.Mesh, EX.lookStr)
     if frameNo % 6 == 0 and pv.cc and pv.rt then

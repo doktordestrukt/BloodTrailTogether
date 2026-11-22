@@ -4,6 +4,12 @@ Versioning: [Semantic Versioning](https://semver.org). The version lives in `CMa
 `release.json` and `Scripts/main.lua` (the release script refuses to build if they differ).
 The network protocol version (`kProtocolVersion`) changes only when old and new clients can no longer talk.
 
+## [0.8.1] - 2026-11-22
+### Fixed
+- Preview model: actor tick and movement off, physics forced off, single-node Human_N_Pose, clamped feet-on-stage correction.
+### Added
+- Accessory slot (NPC headlamp, with/without glass) and full-outfit slot (skm_NPC_test_outfit_4); looks are 12 numbers (10-number looks still load).
+
 ## [0.8.0] - 2026-11-22
 ### Added
 - Character customisation: wardrobe generated from the game's costume meshes/material instances; look = 10 indices, saved in look.txt, synced (`look` event); clothes as master-posed SkeletalMeshComponents on a holder actor; NPC Costume/hair hidden.

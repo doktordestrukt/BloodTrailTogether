@@ -176,7 +176,7 @@ struct WItem {
   std::string name;
   std::vector<std::string> colours;
 };
-std::vector<WItem> g_wd[5];               // top, bottom, shoes, hat, hair
+std::vector<WItem> g_wd[7];               // top, bottom, shoes, hat, hair, accessory, full outfit
 std::vector<std::string> g_fx_names;
 size_t g_wd_lines = 0;
 std::vector<int> g_look;                  // 10 values, 1-based
@@ -187,9 +187,9 @@ int g_drag_x = 0;
 double g_last_drag = -100;
 std::unique_ptr<Gdiplus::Bitmap> g_preview;
 FILETIME g_preview_time{};
-float g_row_flash[9] = {};
+float g_row_flash[11] = {};
 
-const char* kSlotNames[5] = {"top", "bottom", "shoes", "hat", "hair"};
+const char* kSlotNames[7] = {"top", "bottom", "shoes", "hat", "hair", "acc", "outfit"};
 
 void wardrobe_sync() {
   App& a = app();
@@ -215,7 +215,7 @@ void wardrobe_sync() {
         return out;
       };
       if (slot == "fx") { g_fx_names = split(rest, ';'); continue; }
-      for (int i = 0; i < 5; ++i)
+      for (int i = 0; i < 7; ++i)
         if (slot == kSlotNames[i]) {
           size_t bar = rest.find('|');
           WItem it;
@@ -225,7 +225,7 @@ void wardrobe_sync() {
         }
     }
   }
-  if (g_look.size() != 10) {
+  if (g_look.size() != 12) {
     g_look.clear();
     for (size_t p = 0; p < a.look.size();) {
       while (p < a.look.size() && a.look[p] == ' ') ++p;
@@ -233,7 +233,8 @@ void wardrobe_sync() {
       g_look.push_back(atoi(a.look.c_str() + p));
       while (p < a.look.size() && a.look[p] != ' ') ++p;
     }
-    if (g_look.size() != 10) g_look.clear();
+    if (g_look.size() == 10) { g_look.push_back(1); g_look.push_back(1); }  // 0.8 looks: no accessory / outfit
+    if (g_look.size() != 12) g_look.clear();
   }
 }
 
@@ -245,9 +246,9 @@ void look_commit() {
 }
 
 // row r -> (look index, list size); row 4 = shoes colour
-int row_index(int r) { static const int idx[9] = {0, 1, 2, 3, 5, 6, 7, 8, 9}; return idx[r]; }
+int row_index(int r) { static const int idx[11] = {0, 1, 2, 3, 5, 6, 7, 8, 9, 10, 11}; return idx[r]; }
 int row_count(int r) {
-  if (g_look.size() != 10) return 0;
+  if (g_look.size() != 12) return 0;
   auto item = [&](int slot, int li) -> const WItem* {
     int i = g_look[li] - 1;
     return (i >= 0 && i < (int)g_wd[slot].size()) ? &g_wd[slot][i] : nullptr;
@@ -262,11 +263,13 @@ int row_count(int r) {
     case 6: { auto it = item(3, 6); return it ? (int)it->colours.size() : 0; }
     case 7: return (int)g_wd[4].size();
     case 8: return (int)g_fx_names.size();
+    case 9: return (int)g_wd[5].size();
+    case 10: return (int)g_wd[6].size();
   }
   return 0;
 }
 std::string row_value(int r) {
-  if (g_look.size() != 10) return "-";
+  if (g_look.size() != 12) return "-";
   int v = g_look[row_index(r)] - 1;
   auto name_of = [&](int slot) { return (v >= 0 && v < (int)g_wd[slot].size()) ? g_wd[slot][v].name : std::string("-"); };
   auto colour_of = [&](int slot, int li) {
@@ -290,12 +293,14 @@ std::string row_value(int r) {
     case 6: return colour_of(3, 6);
     case 7: return name_of(4);
     case 8: return (v >= 0 && v < (int)g_fx_names.size()) ? g_fx_names[v] : "Classic";
+    case 9: return name_of(5);
+    case 10: return name_of(6);
   }
   return "-";
 }
 void row_step(int r, int d) {
   int n = row_count(r);
-  if (n <= 0 || g_look.size() != 10) return;
+  if (n <= 0 || g_look.size() != 12) return;
   if (r == 4) {  // shoes: 0 = none, 1..n = sneakers in colour n
     int c = g_look[4] <= 1 ? 0 : g_look[5];
     c = ((c + d) % n + n) % n;
@@ -450,7 +455,8 @@ void outfit_load(int i) {
     v.push_back(atoi(s.c_str() + p));
     while (p < s.size() && s[p] != ' ') ++p;
   }
-  if (v.size() != 10) return;
+  if (v.size() == 10) { v.push_back(1); v.push_back(1); }
+  if (v.size() != 12) return;
   g_look = v;
   for (auto& f : g_row_flash) f = 1.0f;
   look_commit();
@@ -494,29 +500,30 @@ void draw_char_panel(Graphics& g, double t) {
   text(g, L"\x27F2  drag to rotate", RectF(pr.X, pr.Y + pr.Height + 4, pr.Width, 18), 11, rgba(140, 128, 122), FontStyleRegular, StringAlignmentCenter);
 
   // pickers
-  static const wchar_t* labels[9] = {L"TOP", L"COLOUR", L"BOTTOM", L"COLOUR", L"SHOES", L"HAT", L"COLOUR", L"HAIR", L"NAME EFFECT"};
-  for (int r = 0; r < 9; ++r) {
-    float y = 92 + r * 40.0f;
-    RectF row(278, y, 258, 34);
+  static const wchar_t* labels[11] = {L"TOP", L"COLOUR", L"BOTTOM", L"COLOUR", L"SHOES", L"HAT", L"COLOUR", L"HAIR", L"NAME EFFECT",
+                                       L"ACCESSORY", L"FULL OUTFIT"};
+  for (int r = 0; r < 11; ++r) {
+    float y = 92 + r * 34.0f;
+    RectF row(278, y, 258, 30);
     g_row_flash[r] = std::max(0.0f, g_row_flash[r] - 0.04f);
     SolidBrush rb(rgba(255, 255, 255, 10 + (int)(40 * g_row_flash[r])));
     fill_round(g, row, 8, rb);
-    text(g, labels[r], RectF(row.X + 10, y, 90, 34), 10.5f, rgba(225, 60, 55), FontStyleBold);
+    text(g, labels[r], RectF(row.X + 10, y, 90, 30), 10.5f, rgba(225, 60, 55), FontStyleBold);
     int n = row_count(r);
-    text(g, to_wide(row_value(r)), RectF(row.X + 92, y, 120, 34), 13, n > 0 ? rgba(240, 232, 226) : rgba(110, 100, 98), FontStyleBold, StringAlignmentCenter);
+    text(g, to_wide(row_value(r)), RectF(row.X + 92, y, 116, 30), 12.5f, n > 0 ? rgba(240, 232, 226) : rgba(110, 100, 98), FontStyleBold, StringAlignmentCenter);
     // arrows (hover glow handled by button())
-    RectF lb(row.X + 206, y + 4, 24, 26), rb2(row.X + 232, y + 4, 24, 26);
+    RectF lb(row.X + 206, y + 3, 24, 24), rb2(row.X + 232, y + 3, 24, 24);
     g.TranslateTransform(-ox, 0);  // hit boxes in window coordinates
     lb.X += ox; rb2.X += ox;
-    button(g, lb, L"\x2039", A_CPREV, n > 1, false, 40 + r);
-    button(g, rb2, L"\x203A", A_CNEXT, n > 1, false, 40 + r);
+    button(g, lb, L"\x2039", A_CPREV, n > 1, false, 30 + r);
+    button(g, rb2, L"\x203A", A_CNEXT, n > 1, false, 30 + r);
     g.TranslateTransform(ox, 0);
   }
   // name with its effect
-  RectF nr(278, 460, 258, 48);
+  RectF nr(278, 472, 258, 40);
   SolidBrush nb(rgba(0, 0, 0, 90));
   fill_round(g, nr, 10, nb);
-  int fx = g_look.size() == 10 ? g_look[9] : 1;
+  int fx = g_look.size() == 12 ? g_look[9] : 1;
   std::wstring name = to_wide(current_name());
   if (name.size() > 16) name.resize(16);
   FontFamily ff(L"Segoe UI Black");
@@ -874,8 +881,8 @@ void click(int x, int y) {
         ShowWindow(g_name, SW_SHOW);
         toast(L"Look saved");
         break;
-      case A_CPREV: row_step(it->row - 40, -1); break;
-      case A_CNEXT: row_step(it->row - 40, 1); break;
+      case A_CPREV: row_step(it->row - 30, -1); break;
+      case A_CNEXT: row_step(it->row - 30, 1); break;
       case A_OUTFIT_SAVE: outfit_save_current(); break;
       case A_OUTFIT_LOAD: outfit_load(it->row - 50); break;
       case A_OUTFIT_DEL:
