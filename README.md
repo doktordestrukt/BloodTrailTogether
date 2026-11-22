@@ -40,7 +40,7 @@
 | 🌐 **Server list** | No codes: host and the game appears in everyone's list. The nearest relay region is chosen automatically. |
 
 <p align="center">
-  <img src="docs/screenshots/character-menu.png" width="420" alt="Character menu">
+  <img src="docs/screenshots/character-menu-ellie.png" width="420" alt="Character menu">
   <img src="docs/screenshots/character-preview-outfit.png" width="420" alt="Character preview">
 </p>
 <p align="center"><img src="docs/screenshots/character-preview-turntable.png" width="860" alt="Turntable preview"></p>
