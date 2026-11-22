@@ -1,68 +1,180 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="900" height="220" viewBox="0 0 900 220">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#1c0b0b"/>
-      <stop offset="1" stop-color="#070606"/>
-    </linearGradient>
-    <radialGradient id="glow" cx="0.5" cy="0.15" r="0.6">
-      <stop offset="0" stop-color="#a01010" stop-opacity="0.55">
-        <animate attributeName="stop-opacity" values="0.35;0.6;0.35" dur="4s" repeatCount="indefinite"/>
-      </stop>
-      <stop offset="1" stop-color="#a01010" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="shine" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#f2ece6"/>
-      <stop offset="0.45" stop-color="#f2ece6"/>
-      <stop offset="0.5" stop-color="#ffffff"/>
-      <stop offset="0.55" stop-color="#f2ece6"/>
-      <stop offset="1" stop-color="#f2ece6"/>
-      <animateTransform attributeName="gradientTransform" type="translate" values="-1 0;1 0" dur="3.5s" repeatCount="indefinite"/>
-    </linearGradient>
-    <linearGradient id="red" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#e02a2a"/>
-      <stop offset="0.5" stop-color="#ff5a4a"/>
-      <stop offset="1" stop-color="#b81818"/>
-      <animateTransform attributeName="gradientTransform" type="translate" values="-0.5 0;0.5 0;-0.5 0" dur="5s" repeatCount="indefinite"/>
-    </linearGradient>
-    <linearGradient id="sweep" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#e02020" stop-opacity="0"/>
-      <stop offset="0.5" stop-color="#ff3a30" stop-opacity="1"/>
-      <stop offset="1" stop-color="#e02020" stop-opacity="0"/>
-    </linearGradient>
-  </defs>
-  <rect width="900" height="220" rx="18" fill="url(#bg)"/>
-  <rect width="900" height="220" rx="18" fill="url(#glow)"/>
-  <!-- blood drips from the top edge -->
-  <g fill="#9c0d0d">
-    <path d="M120 0 h14 v18 q-7 14 -14 0 z">
-      <animateTransform attributeName="transform" type="scale" values="1 1;1 1.9;1 1" dur="6s" repeatCount="indefinite"/>
-    </path>
-    <path d="M610 0 h10 v12 q-5 10 -10 0 z">
-      <animateTransform attributeName="transform" type="scale" values="1 1;1 2.4;1 1" dur="7.5s" repeatCount="indefinite"/>
-    </path>
-    <path d="M790 0 h12 v15 q-6 12 -12 0 z">
-      <animateTransform attributeName="transform" type="scale" values="1 1;1 2.1;1 1" dur="5.2s" repeatCount="indefinite"/>
-    </path>
-    <circle cx="127" cy="40" r="4">
-      <animate attributeName="cy" values="30;220" dur="6s" repeatCount="indefinite"/>
-      <animate attributeName="opacity" values="0;1;1;0" dur="6s" repeatCount="indefinite"/>
-    </circle>
-    <circle cx="615" cy="30" r="3">
-      <animate attributeName="cy" values="26;220" dur="7.5s" begin="2s" repeatCount="indefinite"/>
-      <animate attributeName="opacity" values="0;1;1;0" dur="7.5s" begin="2s" repeatCount="indefinite"/>
-    </circle>
-  </g>
-  <text x="450" y="104" text-anchor="middle" font-family="Segoe UI Black, Arial Black, Impact, sans-serif" font-weight="900" font-size="62" letter-spacing="4">
-    <tspan fill="url(#shine)">BLOODTRAIL</tspan><tspan fill="url(#red)" dx="18">TOGETHER</tspan>
-  </text>
-  <rect x="110" y="124" width="680" height="3" fill="url(#sweep)">
-    <animate attributeName="x" values="-500;900" dur="3s" repeatCount="indefinite"/>
-  </rect>
-  <text x="450" y="160" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="19" fill="#c9bcb6">
-    Unofficial 2-player VR co-op &amp; PvP mod for BloodTrail
-  </text>
-  <text x="450" y="192" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#8c7d78" letter-spacing="2">
-    SERVER LIST · SYNCED GORE · SMARTER NPCS · CHARACTER CUSTOMISATION
-    <animate attributeName="fill" values="#8c7d78;#d96a60;#8c7d78" dur="4s" repeatCount="indefinite"/>
-  </text>
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="240" viewBox="0 0 900 240">
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#1a0707"/><stop offset="1" stop-color="#050303"/>
+  </linearGradient>
+  <radialGradient id="pulse" cx="0.5" cy="0.45" r="0.7">
+    <stop offset="0" stop-color="#b00f0f" stop-opacity="0.5">
+      <animate attributeName="stop-opacity" values="0.25;0.65;0.3;0.6;0.25" keyTimes="0;0.12;0.24;0.36;1" dur="1.6s" repeatCount="indefinite"/>
+    </stop>
+    <stop offset="1" stop-color="#3a0000" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="blood" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#d01616"/><stop offset="0.6" stop-color="#8a0606"/><stop offset="1" stop-color="#4a0202"/>
+  </linearGradient>
+  <linearGradient id="pool" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#7a0303" stop-opacity="0"/><stop offset="0.5" stop-color="#7a0303" stop-opacity="0.85"/><stop offset="1" stop-color="#3c0101"/>
+  </linearGradient>
+  <linearGradient id="shine" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0" stop-color="#efe6df"/><stop offset="0.46" stop-color="#efe6df"/><stop offset="0.5" stop-color="#ffffff"/>
+    <stop offset="0.54" stop-color="#efe6df"/><stop offset="1" stop-color="#efe6df"/>
+    <animateTransform attributeName="gradientTransform" type="translate" values="-1 0;1 0" dur="3.5s" repeatCount="indefinite"/>
+  </linearGradient>
+  <linearGradient id="red" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#ff4a3a"/><stop offset="1" stop-color="#a80c0c"/>
+  </linearGradient>
+  <filter id="wet"><feGaussianBlur stdDeviation="0.6"/></filter>
+  <clipPath id="frame"><rect width="900" height="240" rx="18"/></clipPath>
+</defs>
+<g clip-path="url(#frame)">
+<rect width="900" height="240" fill="url(#bg)"/>
+<rect width="900" height="240" fill="url(#pulse)"/>
+<circle cx="320" cy="60" r="26" fill="#7a0505" opacity="0.13"/>
+<circle cx="274" cy="66" r="4.7" fill="#8a0606" opacity="0.23"/>
+<circle cx="287" cy="26" r="3.0" fill="#8a0606" opacity="0.23"/>
+<circle cx="290" cy="64" r="1.7" fill="#8a0606" opacity="0.23"/>
+<circle cx="327" cy="96" r="3.7" fill="#8a0606" opacity="0.23"/>
+<circle cx="329" cy="24" r="3.5" fill="#8a0606" opacity="0.23"/>
+<circle cx="269" cy="37" r="3.4" fill="#8a0606" opacity="0.23"/>
+<circle cx="278" cy="53" r="3.4" fill="#8a0606" opacity="0.23"/>
+<circle cx="502" cy="113" r="26" fill="#7a0505" opacity="0.14"/>
+<circle cx="519" cy="102" r="3.4" fill="#8a0606" opacity="0.24"/>
+<circle cx="452" cy="76" r="2.2" fill="#8a0606" opacity="0.24"/>
+<circle cx="523" cy="107" r="2.6" fill="#8a0606" opacity="0.24"/>
+<circle cx="512" cy="109" r="2.5" fill="#8a0606" opacity="0.24"/>
+<circle cx="537" cy="130" r="2.4" fill="#8a0606" opacity="0.24"/>
+<circle cx="511" cy="115" r="4.6" fill="#8a0606" opacity="0.24"/>
+<circle cx="529" cy="95" r="4.9" fill="#8a0606" opacity="0.24"/>
+<circle cx="167" cy="94" r="28" fill="#7a0505" opacity="0.14"/>
+<circle cx="158" cy="136" r="1.8" fill="#8a0606" opacity="0.24"/>
+<circle cx="175" cy="120" r="4.4" fill="#8a0606" opacity="0.24"/>
+<circle cx="148" cy="81" r="3.2" fill="#8a0606" opacity="0.24"/>
+<circle cx="204" cy="55" r="1.8" fill="#8a0606" opacity="0.24"/>
+<circle cx="139" cy="112" r="1.7" fill="#8a0606" opacity="0.24"/>
+<circle cx="196" cy="77" r="3.5" fill="#8a0606" opacity="0.24"/>
+<circle cx="584" cy="98" r="27" fill="#7a0505" opacity="0.26"/>
+<circle cx="527" cy="95" r="2.1" fill="#8a0606" opacity="0.36"/>
+<circle cx="538" cy="60" r="4.2" fill="#8a0606" opacity="0.36"/>
+<circle cx="540" cy="76" r="2.9" fill="#8a0606" opacity="0.36"/>
+<circle cx="629" cy="61" r="3.1" fill="#8a0606" opacity="0.36"/>
+<circle cx="590" cy="131" r="4.4" fill="#8a0606" opacity="0.36"/>
+<circle cx="719" cy="76" r="20" fill="#7a0505" opacity="0.18"/>
+<circle cx="760" cy="54" r="2.1" fill="#8a0606" opacity="0.28"/>
+<circle cx="696" cy="59" r="3.2" fill="#8a0606" opacity="0.28"/>
+<circle cx="727" cy="61" r="1.5" fill="#8a0606" opacity="0.28"/>
+<circle cx="712" cy="68" r="3.5" fill="#8a0606" opacity="0.28"/>
+<circle cx="759" cy="88" r="3.3" fill="#8a0606" opacity="0.28"/>
+<circle cx="730" cy="87" r="1.7" fill="#8a0606" opacity="0.28"/>
+<circle cx="746" cy="141" r="31" fill="#7a0505" opacity="0.25"/>
+<circle cx="732" cy="131" r="3.2" fill="#8a0606" opacity="0.35"/>
+<circle cx="732" cy="111" r="4.9" fill="#8a0606" opacity="0.35"/>
+<circle cx="738" cy="103" r="3.6" fill="#8a0606" opacity="0.35"/>
+<circle cx="691" cy="148" r="3.4" fill="#8a0606" opacity="0.35"/>
+<circle cx="807" cy="153" r="1.7" fill="#8a0606" opacity="0.35"/>
+<circle cx="706" cy="129" r="3.7" fill="#8a0606" opacity="0.35"/>
+<circle cx="787" cy="118" r="21" fill="#7a0505" opacity="0.14"/>
+<circle cx="833" cy="116" r="3.2" fill="#8a0606" opacity="0.24"/>
+<circle cx="748" cy="91" r="2.7" fill="#8a0606" opacity="0.24"/>
+<circle cx="765" cy="141" r="2.1" fill="#8a0606" opacity="0.24"/>
+<circle cx="742" cy="149" r="3.3" fill="#8a0606" opacity="0.24"/>
+<circle cx="754" cy="121" r="1.6" fill="#8a0606" opacity="0.24"/>
+<circle cx="790" cy="151" r="4.5" fill="#8a0606" opacity="0.24"/>
+<circle cx="595" cy="74" r="19" fill="#7a0505" opacity="0.15"/>
+<circle cx="598" cy="91" r="2.7" fill="#8a0606" opacity="0.25"/>
+<circle cx="572" cy="93" r="4.9" fill="#8a0606" opacity="0.25"/>
+<circle cx="624" cy="92" r="4.4" fill="#8a0606" opacity="0.25"/>
+<circle cx="615" cy="58" r="3.3" fill="#8a0606" opacity="0.25"/>
+<circle cx="343" cy="44" r="11" fill="#7a0505" opacity="0.16"/>
+<circle cx="329" cy="47" r="2.7" fill="#8a0606" opacity="0.26"/>
+<circle cx="358" cy="51" r="2.7" fill="#8a0606" opacity="0.26"/>
+<circle cx="365" cy="29" r="1.9" fill="#8a0606" opacity="0.26"/>
+<circle cx="342" cy="38" r="3.2" fill="#8a0606" opacity="0.26"/>
+<circle cx="366" cy="48" r="1.5" fill="#8a0606" opacity="0.26"/>
+<circle cx="753" cy="85" r="25" fill="#7a0505" opacity="0.25"/>
+<circle cx="799" cy="108" r="4.1" fill="#8a0606" opacity="0.35"/>
+<circle cx="750" cy="59" r="4.3" fill="#8a0606" opacity="0.35"/>
+<circle cx="734" cy="109" r="4.9" fill="#8a0606" opacity="0.35"/>
+<circle cx="373" cy="92" r="33" fill="#7a0505" opacity="0.24"/>
+<circle cx="444" cy="43" r="3.6" fill="#8a0606" opacity="0.34"/>
+<circle cx="368" cy="109" r="3.6" fill="#8a0606" opacity="0.34"/>
+<circle cx="387" cy="89" r="4.8" fill="#8a0606" opacity="0.34"/>
+<circle cx="323" cy="97" r="1.6" fill="#8a0606" opacity="0.34"/>
+<circle cx="672" cy="134" r="12" fill="#7a0505" opacity="0.24"/>
+<circle cx="668" cy="149" r="4.4" fill="#8a0606" opacity="0.34"/>
+<circle cx="656" cy="125" r="2.5" fill="#8a0606" opacity="0.34"/>
+<circle cx="657" cy="138" r="2.4" fill="#8a0606" opacity="0.34"/>
+<circle cx="667" cy="120" r="4.7" fill="#8a0606" opacity="0.34"/>
+<circle cx="342" cy="100" r="24" fill="#7a0505" opacity="0.26"/>
+<circle cx="376" cy="129" r="2.0" fill="#8a0606" opacity="0.36"/>
+<circle cx="305" cy="100" r="4.6" fill="#8a0606" opacity="0.36"/>
+<circle cx="371" cy="108" r="4.2" fill="#8a0606" opacity="0.36"/>
+<circle cx="305" cy="72" r="3.7" fill="#8a0606" opacity="0.36"/>
+<circle cx="302" cy="66" r="3.9" fill="#8a0606" opacity="0.36"/>
+<circle cx="345" cy="98" r="4.2" fill="#8a0606" opacity="0.36"/>
+<circle cx="734" cy="47" r="15" fill="#7a0505" opacity="0.13"/>
+<circle cx="734" cy="50" r="4.2" fill="#8a0606" opacity="0.23"/>
+<circle cx="760" cy="45" r="3.6" fill="#8a0606" opacity="0.23"/>
+<circle cx="734" cy="48" r="3.9" fill="#8a0606" opacity="0.23"/>
+<circle cx="415" cy="109" r="21" fill="#7a0505" opacity="0.27"/>
+<circle cx="450" cy="140" r="2.4" fill="#8a0606" opacity="0.37"/>
+<circle cx="420" cy="140" r="4.4" fill="#8a0606" opacity="0.37"/>
+<circle cx="380" cy="83" r="3.0" fill="#8a0606" opacity="0.37"/>
+<circle cx="374" cy="92" r="1.8" fill="#8a0606" opacity="0.37"/>
+<circle cx="431" cy="129" r="4.6" fill="#8a0606" opacity="0.37"/>
+<circle cx="382" cy="124" r="3.8" fill="#8a0606" opacity="0.37"/>
+<circle cx="381" cy="136" r="4.9" fill="#8a0606" opacity="0.37"/>
+<circle cx="242" cy="164" r="20" fill="#7a0505" opacity="0.20"/>
+<circle cx="213" cy="160" r="3.3" fill="#8a0606" opacity="0.30"/>
+<circle cx="229" cy="145" r="2.6" fill="#8a0606" opacity="0.30"/>
+<circle cx="262" cy="134" r="3.4" fill="#8a0606" opacity="0.30"/>
+<circle cx="237" cy="134" r="2.7" fill="#8a0606" opacity="0.30"/>
+<path d="M34 0 h10.6 v16 q-5.3 13.8 -10.6 0 z" fill="url(#blood)" filter="url(#wet)"><animateTransform attributeName="transform" type="translate" values="0 0;0 0" dur="1s"/><animate attributeName="d" dur="8.9s" begin="3.2s" repeatCount="indefinite" values="M34 0 h10.6 v16 q-5.3 13.8 -10.6 0 z;M34 0 h10.6 v31 q-5.3 17.0 -10.6 0 z;M34 0 h10.6 v16 q-5.3 13.8 -10.6 0 z"/></path>
+<ellipse cx="39" cy="0" rx="3.4" ry="4.8" fill="#b30d0d"><animate attributeName="cy" values="31;250" dur="4.0s" begin="7.6s" repeatCount="indefinite"/><animate attributeName="opacity" values="1;1;0" dur="4.0s" begin="7.6s" repeatCount="indefinite"/></ellipse>
+<path d="M106 0 h6.9 v22 q-3.5 9.0 -6.9 0 z" fill="url(#blood)" filter="url(#wet)"><animateTransform attributeName="transform" type="translate" values="0 0;0 0" dur="1s"/><animate attributeName="d" dur="4.7s" begin="3.1s" repeatCount="indefinite" values="M106 0 h6.9 v22 q-3.5 9.0 -6.9 0 z;M106 0 h6.9 v43 q-3.5 11.1 -6.9 0 z;M106 0 h6.9 v22 q-3.5 9.0 -6.9 0 z"/></path>
+<ellipse cx="110" cy="0" rx="2.2" ry="3.1" fill="#b30d0d"><animate attributeName="cy" values="43;250" dur="2.1s" begin="5.5s" repeatCount="indefinite"/><animate attributeName="opacity" values="1;1;0" dur="2.1s" begin="5.5s" repeatCount="indefinite"/></ellipse>
+<path d="M147 0 h7.2 v28 q-3.6 9.3 -7.2 0 z" fill="url(#blood)" filter="url(#wet)"><animateTransform attributeName="transform" type="translate" values="0 0;0 0" dur="1s"/><animate attributeName="d" dur="8.6s" begin="3.3s" repeatCount="indefinite" values="M147 0 h7.2 v28 q-3.6 9.3 -7.2 0 z;M147 0 h7.2 v52 q-3.6 11.5 -7.2 0 z;M147 0 h7.2 v28 q-3.6 9.3 -7.2 0 z"/></path>
+<ellipse cx="151" cy="0" rx="2.3" ry="3.2" fill="#b30d0d"><animate attributeName="cy" values="52;250" dur="3.9s" begin="7.6s" repeatCount="indefinite"/><animate attributeName="opacity" values="1;1;0" dur="3.9s" begin="7.6s" repeatCount="indefinite"/></ellipse>
+<path d="M209 0 h7.3 v43 q-3.7 9.5 -7.3 0 z" fill="url(#blood)" filter="url(#wet)"><animateTransform attributeName="transform" type="translate" values="0 0;0 0" dur="1s"/><animate attributeName="d" dur="7.1s" begin="2.8s" repeatCount="indefinite" values="M209 0 h7.3 v43 q-3.7 9.5 -7.3 0 z;M209 0 h7.3 v82 q-3.7 11.8 -7.3 0 z;M209 0 h7.3 v43 q-3.7 9.5 -7.3 0 z"/></path>
+<ellipse cx="212" cy="0" rx="2.4" ry="3.3" fill="#b30d0d"><animate attributeName="cy" values="82;250" dur="3.2s" begin="6.3s" repeatCount="indefinite"/><animate attributeName="opacity" values="1;1;0" dur="3.2s" begin="6.3s" repeatCount="indefinite"/></ellipse>
+<path d="M266 0 h6.5 v36 q-3.3 8.5 -6.5 0 z" fill="url(#blood)" filter="url(#wet)"><animateTransform attributeName="transform" type="translate" values="0 0;0 0" dur="1s"/><animate attributeName="d" dur="6.4s" begin="0.3s" repeatCount="indefinite" values="M266 0 h6.5 v36 q-3.3 8.5 -6.5 0 z;M266 0 h6.5 v68 q-3.3 10.4 -6.5 0 z;M266 0 h6.5 v36 q-3.3 8.5 -6.5 0 z"/></path>
+<ellipse cx="269" cy="0" rx="2.1" ry="2.9" fill="#b30d0d"><animate attributeName="cy" values="68;250" dur="2.9s" begin="3.5s" repeatCount="indefinite"/><animate attributeName="opacity" values="1;1;0" dur="2.9s" begin="3.5s" repeatCount="indefinite"/></ellipse>
+<path d="M353 0 h11.7 v40 q-5.9 15.2 -11.7 0 z" fill="url(#blood)" filter="url(#wet)"><animateTransform attributeName="transform" type="translate" values="0 0;0 0" dur="1s"/><animate attributeName="d" dur="4.9s" begin="3.4s" repeatCount="indefinite" values="M353 0 h11.7 v40 q-5.9 15.2 -11.7 0 z;M353 0 h11.7 v75 q-5.9 18.7 -11.7 0 z;M353 0 h11.7 v40 q-5.9 15.2 -11.7 0 z"/></path>
+<ellipse cx="359" cy="0" rx="3.7" ry="5.3" fill="#b30d0d"><animate attributeName="cy" values="75;250" dur="2.2s" begin="5.9s" repeatCount="indefinite"/><animate attributeName="opacity" values="1;1;0" dur="2.2s" begin="5.9s" repeatCount="indefinite"/></ellipse>
+<path d="M389 0 h13.8 v29 q-6.9 17.9 -13.8 0 z" fill="url(#blood)" filter="url(#wet)"><animateTransform attributeName="transform" type="translate" values="0 0;0 0" dur="1s"/><animate attributeName="d" dur="6.0s" begin="2.2s" repeatCount="indefinite" values="M389 0 h13.8 v29 q-6.9 17.9 -13.8 0 z;M389 0 h13.8 v54 q-6.9 22.0 -13.8 0 z;M389 0 h13.8 v29 q-6.9 17.9 -13.8 0 z"/></path>
+<ellipse cx="396" cy="0" rx="4.4" ry="6.2" fill="#b30d0d"><animate attributeName="cy" values="54;250" dur="2.7s" begin="5.2s" repeatCount="indefinite"/><animate attributeName="opacity" values="1;1;0" dur="2.7s" begin="5.2s" repeatCount="indefinite"/></ellipse>
+<path d="M477 0 h8.4 v18 q-4.2 10.9 -8.4 0 z" fill="url(#blood)" filter="url(#wet)"><animateTransform attributeName="transform" type="translate" values="0 0;0 0" dur="1s"/><animate attributeName="d" dur="6.9s" begin="1.0s" repeatCount="indefinite" values="M477 0 h8.4 v18 q-4.2 10.9 -8.4 0 z;M477 0 h8.4 v34 q-4.2 13.5 -8.4 0 z;M477 0 h8.4 v18 q-4.2 10.9 -8.4 0 z"/></path>
+<ellipse cx="481" cy="0" rx="2.7" ry="3.8" fill="#b30d0d"><animate attributeName="cy" values="34;250" dur="3.1s" begin="4.4s" repeatCount="indefinite"/><animate attributeName="opacity" values="1;1;0" dur="3.1s" begin="4.4s" repeatCount="indefinite"/></ellipse>
+<path d="M514 0 h7.5 v16 q-3.7 9.7 -7.5 0 z" fill="url(#blood)" filter="url(#wet)"><animateTransform attributeName="transform" type="translate" values="0 0;0 0" dur="1s"/><animate attributeName="d" dur="5.4s" begin="1.2s" repeatCount="indefinite" values="M514 0 h7.5 v16 q-3.7 9.7 -7.5 0 z;M514 0 h7.5 v30 q-3.7 11.9 -7.5 0 z;M514 0 h7.5 v16 q-3.7 9.7 -7.5 0 z"/></path>
+<ellipse cx="518" cy="0" rx="2.4" ry="3.4" fill="#b30d0d"><animate attributeName="cy" values="30;250" dur="2.4s" begin="4.0s" repeatCount="indefinite"/><animate attributeName="opacity" values="1;1;0" dur="2.4s" begin="4.0s" repeatCount="indefinite"/></ellipse>
+<path d="M582 0 h12.8 v23 q-6.4 16.7 -12.8 0 z" fill="url(#blood)" filter="url(#wet)"><animateTransform attributeName="transform" type="translate" values="0 0;0 0" dur="1s"/><animate attributeName="d" dur="6.8s" begin="0.7s" repeatCount="indefinite" values="M582 0 h12.8 v23 q-6.4 16.7 -12.8 0 z;M582 0 h12.8 v44 q-6.4 20.5 -12.8 0 z;M582 0 h12.8 v23 q-6.4 16.7 -12.8 0 z"/></path>
+<ellipse cx="589" cy="0" rx="4.1" ry="5.8" fill="#b30d0d"><animate attributeName="cy" values="44;250" dur="3.0s" begin="4.1s" repeatCount="indefinite"/><animate attributeName="opacity" values="1;1;0" dur="3.0s" begin="4.1s" repeatCount="indefinite"/></ellipse>
+<path d="M645 0 h6.2 v22 q-3.1 8.0 -6.2 0 z" fill="url(#blood)" filter="url(#wet)"><animateTransform attributeName="transform" type="translate" values="0 0;0 0" dur="1s"/><animate attributeName="d" dur="4.6s" begin="2.9s" repeatCount="indefinite" values="M645 0 h6.2 v22 q-3.1 8.0 -6.2 0 z;M645 0 h6.2 v42 q-3.1 9.9 -6.2 0 z;M645 0 h6.2 v22 q-3.1 8.0 -6.2 0 z"/></path>
+<ellipse cx="648" cy="0" rx="2.0" ry="2.8" fill="#b30d0d"><animate attributeName="cy" values="42;250" dur="2.1s" begin="5.2s" repeatCount="indefinite"/><animate attributeName="opacity" values="1;1;0" dur="2.1s" begin="5.2s" repeatCount="indefinite"/></ellipse>
+<path d="M714 0 h7.7 v29 q-3.9 10.0 -7.7 0 z" fill="url(#blood)" filter="url(#wet)"><animateTransform attributeName="transform" type="translate" values="0 0;0 0" dur="1s"/><animate attributeName="d" dur="8.7s" begin="0.4s" repeatCount="indefinite" values="M714 0 h7.7 v29 q-3.9 10.0 -7.7 0 z;M714 0 h7.7 v55 q-3.9 12.3 -7.7 0 z;M714 0 h7.7 v29 q-3.9 10.0 -7.7 0 z"/></path>
+<ellipse cx="717" cy="0" rx="2.5" ry="3.5" fill="#b30d0d"><animate attributeName="cy" values="55;250" dur="3.9s" begin="4.8s" repeatCount="indefinite"/><animate attributeName="opacity" values="1;1;0" dur="3.9s" begin="4.8s" repeatCount="indefinite"/></ellipse>
+<path d="M784 0 h9.9 v30 q-4.9 12.9 -9.9 0 z" fill="url(#blood)" filter="url(#wet)"><animateTransform attributeName="transform" type="translate" values="0 0;0 0" dur="1s"/><animate attributeName="d" dur="8.3s" begin="1.6s" repeatCount="indefinite" values="M784 0 h9.9 v30 q-4.9 12.9 -9.9 0 z;M784 0 h9.9 v57 q-4.9 15.8 -9.9 0 z;M784 0 h9.9 v30 q-4.9 12.9 -9.9 0 z"/></path>
+<ellipse cx="789" cy="0" rx="3.2" ry="4.5" fill="#b30d0d"><animate attributeName="cy" values="57;250" dur="3.7s" begin="5.7s" repeatCount="indefinite"/><animate attributeName="opacity" values="1;1;0" dur="3.7s" begin="5.7s" repeatCount="indefinite"/></ellipse>
+<path d="M836 0 h12.2 v45 q-6.1 15.8 -12.2 0 z" fill="url(#blood)" filter="url(#wet)"><animateTransform attributeName="transform" type="translate" values="0 0;0 0" dur="1s"/><animate attributeName="d" dur="6.0s" begin="3.3s" repeatCount="indefinite" values="M836 0 h12.2 v45 q-6.1 15.8 -12.2 0 z;M836 0 h12.2 v86 q-6.1 19.5 -12.2 0 z;M836 0 h12.2 v45 q-6.1 15.8 -12.2 0 z"/></path>
+<ellipse cx="842" cy="0" rx="3.9" ry="5.5" fill="#b30d0d"><animate attributeName="cy" values="86;250" dur="2.7s" begin="6.4s" repeatCount="indefinite"/><animate attributeName="opacity" values="1;1;0" dur="2.7s" begin="6.4s" repeatCount="indefinite"/></ellipse>
+<text x="450" y="112" text-anchor="middle" font-family="Segoe UI Black, Arial Black, Impact, sans-serif" font-weight="900" font-size="64" letter-spacing="4"><tspan fill="url(#shine)">BLOODTRAIL</tspan><tspan fill="url(#red)" dx="18">TOGETHER</tspan></text>
+<rect x="502" y="110" width="5.5" height="15" rx="2.8" fill="#b80f0f"><animate attributeName="height" values="15;34;15" dur="4.0s" repeatCount="indefinite"/></rect>
+<rect x="532" y="110" width="3.5" height="9" rx="1.8" fill="#b80f0f"><animate attributeName="height" values="9;20;9" dur="5.2s" repeatCount="indefinite"/></rect>
+<rect x="571" y="110" width="3.7" height="10" rx="1.8" fill="#b80f0f"><animate attributeName="height" values="10;21;10" dur="5.5s" repeatCount="indefinite"/></rect>
+<rect x="615" y="110" width="5.7" height="13" rx="2.8" fill="#b80f0f"><animate attributeName="height" values="13;29;13" dur="3.7s" repeatCount="indefinite"/></rect>
+<rect x="646" y="110" width="4.8" height="11" rx="2.4" fill="#b80f0f"><animate attributeName="height" values="11;24;11" dur="4.3s" repeatCount="indefinite"/></rect>
+<rect x="682" y="110" width="6.8" height="26" rx="3.4" fill="#b80f0f"><animate attributeName="height" values="26;56;26" dur="4.6s" repeatCount="indefinite"/></rect>
+<rect x="719" y="110" width="6.9" height="14" rx="3.4" fill="#b80f0f"><animate attributeName="height" values="14;30;14" dur="4.1s" repeatCount="indefinite"/></rect>
+<rect x="753" y="110" width="4.5" height="17" rx="2.3" fill="#b80f0f"><animate attributeName="height" values="17;36;17" dur="4.5s" repeatCount="indefinite"/></rect>
+<rect x="792" y="110" width="5.0" height="8" rx="2.5" fill="#b80f0f"><animate attributeName="height" values="8;18;8" dur="3.8s" repeatCount="indefinite"/></rect>
+<rect x="132" y="110" width="4" height="12" rx="2" fill="#8a0606"><animate attributeName="height" values="6;22;6" dur="5.2s" repeatCount="indefinite"/></rect>
+<rect x="201" y="110" width="4" height="12" rx="2" fill="#8a0606"><animate attributeName="height" values="6;22;6" dur="4.1s" repeatCount="indefinite"/></rect>
+<rect x="276" y="110" width="4" height="12" rx="2" fill="#8a0606"><animate attributeName="height" values="6;22;6" dur="4.7s" repeatCount="indefinite"/></rect>
+<rect x="352" y="110" width="4" height="12" rx="2" fill="#8a0606"><animate attributeName="height" values="6;22;6" dur="5.6s" repeatCount="indefinite"/></rect>
+<rect x="425" y="110" width="4" height="12" rx="2" fill="#8a0606"><animate attributeName="height" values="6;22;6" dur="6.0s" repeatCount="indefinite"/></rect>
+<text x="450" y="166" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="19" fill="#d7c6c0">Unofficial 2-player VR co-op &amp; PvP mod for BloodTrail</text>
+<text x="450" y="194" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="13.5" fill="#9b6a64" letter-spacing="2">SERVER LIST · SYNCED GORE · SMARTER NPCS · CHARACTER CUSTOMISATION
+  <animate attributeName="fill" values="#9b6a64;#e0473d;#9b6a64" dur="1.6s" repeatCount="indefinite"/></text>
+<path fill="url(#pool)" d="M0 214 Q120 204 240 214 T480 212 T720 214 T900 210 V240 H0 Z"><animate attributeName="d" dur="6s" repeatCount="indefinite" values="M0 214 Q120 204 240 214 T480 212 T720 214 T900 210 V240 H0 Z;M0 210 Q120 218 240 208 T480 216 T720 208 T900 214 V240 H0 Z;M0 214 Q120 204 240 214 T480 212 T720 214 T900 210 V240 H0 Z"/></path>
+</g>
+<rect x="1" y="1" width="898" height="238" rx="18" fill="none" stroke="#6e0b0b" stroke-width="2"><animate attributeName="stroke" values="#4a0606;#c41414;#4a0606" dur="1.6s" repeatCount="indefinite"/></rect>
 </svg>
