@@ -38,7 +38,7 @@
 
 | | |
 |---|---|
-| 🧍 **Full-body players** | Your friend is a full human body: head follows their headset, arms follow their controllers, legs walk, strafe and turn, fingers wrap round what they hold. |
+| 🧍 **Full-body players** | Your friend is a full human body: head looks where they look, arms follow their controllers, legs walk, strafe and turn. |
 | 🔫 **Real combat** | Shoot each other with location damage (headshots kill), the game's own gore and ragdolls, muzzle flashes, bullet holes, 3D gunshots, death and respawn. |
 | 🧟 **Shared NPCs** | The same NPCs in both games: synced movement, wounds, bodies, and voices with subtitles. They hear and attack **both** players. |
 | 🧠 **Smarter NPCs** | NPCs take ammo from dead bodies, run for it or surrender when losing, and investigate both players' noise. Works in single-player too. |
@@ -71,7 +71,7 @@ More: [INSTALLATION.md](INSTALLATION.md) · [TROUBLESHOOTING.md](TROUBLESHOOTING
 
 ## $\color{#e0504a}{\textsf{Known limits}}$
 
-- On the **host**, while live AI NPCs are around, the other player's arms use the game's own animation. Arm tracking there crashed the game.
+- Fingers of the other player don't curl around items, and their head turns with the game's look-at rather than exact headset tilt.
 - NPC AI only targets the host natively. Shots and melee at the joining player are simulated from the host's NPCs.
 - NPC subtitles describe each line; the game has no transcripts.
 - Objects spawned mid-game (dropped magazines, casings) are not synced. Only objects that are part of the map are.

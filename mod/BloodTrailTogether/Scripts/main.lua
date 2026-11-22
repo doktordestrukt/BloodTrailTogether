@@ -7,7 +7,7 @@
 -- Everything that touches the game is wrapped in pcall: a failure disables that feature and is
 -- logged to UE4SS.log / BloodTrailTogether.log instead of crashing the game.
 
-local VERSION = "0.8.4"
+local VERSION = "0.8.5"
 local TAG = "[BloodTrailTogether] "
 local UEHelpers = require("UEHelpers")
 
@@ -384,10 +384,14 @@ local function resolveHeld(side, ctrl)
                 if EX.isLevel(actor) then st.comp, st.actor = main, actor return end
                 parts, sig, ms = heldParts(actor, main)
                 st.comp, st.actor = main, actor
+                pcall(function() st.class = objPath(actor:GetClass()) end)
             end)
         end
         if sig ~= st.sig then
             st.sig = sig
+            -- the item's class first: the other game loads it, which loads its meshes (0.8.4: a gun
+            -- whose model the other game had never loaded was invisible - "held item mesh not found")
+            if sig ~= "" and st.class then heldEvents[#heldEvents + 1] = string.format("heldclass %s %s", side, st.class) end
             heldEvents[#heldEvents + 1] = string.format("held %s %d %.3f", side, #parts, ms)
             for i, p in ipairs(parts) do heldEvents[#heldEvents + 1] = string.format("heldpart %s %d %s", side, i, p) end
             if sig ~= "" then log("holding in " .. side .. " hand: " .. sig) end
@@ -884,6 +888,7 @@ local function installHitHook()
                 if onNpcHit and hx then onNpcHit(npc, bone, hx, hy, hz, nx, ny, nz, causer, exitWound) end
                 return
             end
+            EX.puppetHitAt = frameNo
             if puppetDead then return end
             if exitWound then return end  -- the entry wound already counted
             -- Only damage dealt by YOU counts: bullets (only players and NPC guns fire them; NPCs don't
@@ -1251,6 +1256,29 @@ local function updateHeldItem(side, on, x, y, z, qx, qy, qz, qw)
                 log("held item mesh not found: " .. part.path)
             end
         end
+        if #h.actors == 0 and want.class then
+            -- the meshes are not in memory here: show a copy of the item itself (its blueprint),
+            -- made inert - no collision (cannot be grabbed), no physics, no tick
+            -- a map change unloads a class nothing else uses: load it again if needed
+            if not valid(StaticFindObject(want.class)) then pcall(LoadAsset, want.class) end
+            local okA, a = pcall(spawnActor, want.class)
+            if not (okA and a) and want.copyLogged ~= want.ver then
+                want.copyLogged = want.ver
+                log("could not show a copy of " .. want.class .. ": " .. tostring(a) .. " (class loaded: " .. tostring(valid(StaticFindObject(want.class))) .. ")")
+            end
+            if okA and a then
+                pcall(function() a:SetActorTickEnabled(false) end)
+                pcall(function() a:K2_GetRootComponent():SetSimulatePhysics(false) end)
+                pcall(function()
+                    for _, c in ipairs(componentsOf(a, cls("/Script/Engine.PrimitiveComponent"))) do
+                        pcall(function() c:SetSimulatePhysics(false) end)
+                        pcall(function() c:SetCollisionEnabled(0) end)
+                    end
+                end)
+                h.actors[1], h.parts[1] = a, { x = 0, y = 0, z = 0, q = { 0, 0, 0, 1 }, s = 1 }
+                names[1] = want.class:match("([^/%.]+)$") .. " (blueprint copy)"
+            end
+        end
         if #h.actors == 0 then want.failedVer, want.failedAt = want.ver, os.clock() return end
         heldShown[side] = h
         log("other player holds in " .. side .. " hand: " .. table.concat(names, ", "))
@@ -1284,6 +1312,62 @@ local function worldTime()
     return ok and t or nil
 end
 
+-- Arms without the pose-copy mesh (host with live AI NPCs, where that mesh crashed the game):
+-- the NPC's animation blueprint already contains two-bone IK nodes for the hands (ALS hand IK).
+-- We switch them to world space, point them at the other player's controllers and force their
+-- weight to 1. The NPC mesh itself is untouched and stays visible, so nothing the game's AI
+-- relies on changes.
+local IK_NODES = { "AnimGraphNode_TwoBoneIK", "AnimGraphNode_TwoBoneIK_1", "AnimGraphNode_TwoBoneIK_2", "AnimGraphNode_TwoBoneIK_3" }
+function EX.animArmIK(P, v, flags)
+    if P.armNodes == nil then
+        P.armNodes = {}
+        local found = {}
+        for _, name in ipairs(IK_NODES) do
+            local okN, n = pcall(function() return P.anim[name] end)
+            if okN and n then
+                local bone = "?"
+                pcall(function() bone = n.IKBone.BoneName:ToString() end)
+                found[#found + 1] = name .. "=" .. bone
+                local b = bone:lower()
+                if b == "hand_l" then P.armNodes.l = name elseif b == "hand_r" then P.armNodes.r = name end
+            end
+        end
+        log("anim-graph arm IK nodes: " .. table.concat(found, ", "))
+    end
+    local by = P.bodyYaw * DEG
+    local Fx, Fy = math.cos(by), math.sin(by)
+    for _, side in ipairs({ "l", "r" }) do
+        local name = P.armNodes[side]
+        if name then
+            local n = P.anim[name]
+            local s = side == "l" and -1 or 1
+            local sh = P.mesh:GetSocketLocation(FName("upperarm_" .. side))
+            local tx, ty, tz
+            local tracked = (flags & (side == "l" and 1 or 2)) ~= 0
+            if tracked then
+                local o = side == "l" and 8 or 15
+                local fx, fy, fz = qrot(v[o + 3], v[o + 4], v[o + 5], v[o + 6], 1, 0, 0)
+                tx, ty, tz = v[o] - fx * 7, v[o + 1] - fy * 7, v[o + 2] - fz * 7      -- wrist ~7 cm behind the grip
+            else
+                tx, ty, tz = sh.X - Fy * s * 7 + Fx * 3, sh.Y + Fx * s * 7 + Fy * 3, sh.Z - 58   -- hanging relaxed
+            end
+            -- elbow: down, out and a little back from the shoulder-wrist line
+            local mx, my, mz = (sh.X + tx) / 2, (sh.Y + ty) / 2, (sh.Z + tz) / 2
+            local jx, jy, jz = mx - Fy * s * 25 - Fx * 12, my + Fx * s * 25 - Fy * 12, mz - 30
+            n.EffectorLocationSpace = 0
+            n.JointTargetLocationSpace = 0
+            n.EffectorLocation = { X = tx, Y = ty, Z = tz }
+            n.JointTargetLocation = { X = jx, Y = jy, Z = jz }
+            n.bAllowStretching = false
+            n.bTakeRotationFromEffectorSpace = false
+            n.AlphaInputType = 0
+            n.Alpha = 1.0
+            n.AlphaScaleBias = { Scale = 0.0, Bias = 1.0 }   -- weight 1 even if the graph binds Alpha to a curve
+            P["armT" .. side] = { tx, ty, tz }
+        end
+    end
+end
+
 -- v: head(1-7) left(8-14) right(15-21) body(22-28) heldL(29-35) heldR(36-42) flags(43)
 local function updatePuppet(v)
     if puppetFailed or selfTest:find("nopuppet", 1, true) then return false end
@@ -1301,7 +1385,10 @@ local function updatePuppet(v)
         -- KNOWN GAME CRASH (0.3-0.5.1): on the host, with live AI NPCs around, the pose-copy body
         -- (arms/head following the controllers) crashed the game within a minute. There the body
         -- uses the game's own animation + look-at instead; everywhere else the full IK is used.
-        local noIK = EX.hostHasAi()
+        -- 0.8.5: the pose-copy mesh is never used. It crashed the game on BOTH sides (0.8.4 joined a
+        -- simulated player and crashed after ~1 minute every time; without it: no crash). The arms
+        -- now come from the NPC animation's own hand IK (EX.animArmIK) for both players.
+        local noIK = true
         local okB, P = pcall(setupBody, a, noIK)
         if not okB then log("body setup failed: " .. tostring(P)) destroyPuppet() puppetFailed = true return false end
         pup = P
@@ -1335,6 +1422,22 @@ local function updatePuppet(v)
         P.mesh:SetAllBodiesSimulatePhysics(false)
         P.mesh:SetAllBodiesPhysicsBlendWeight(0.0, false)
     end)
+    -- A bullet hit puts the NPC body into the game's ragdoll state (ALS MovementState 4, movement
+    -- mode None) and after a few hits the game marks it dead locally: in that state ALS turns the
+    -- body after the (frozen) pelvis and it spun at up to 1600 deg/s (0.8.4 test). Only the owner
+    -- decides life and death: undo it right away.
+    if not selfTest:find("nounrag", 1, true) then pcall(function()
+        if puppet.MovementState ~= 1 or puppet.Dead == true or puppet.bRagdolling == true then
+            pcall(function() puppet.bRagdolling = false end)
+            pcall(function() puppet:BPI_Set_MovementState(1) end)
+            pcall(function() puppet.MovementState = 1 end)
+            pcall(function() P.cm:SetMovementMode(1, 0) end)
+            pcall(function() puppet.Dead = false end)
+            pcall(function() puppet.HealthOverall = 100000 end)
+            P.unRagdolls = (P.unRagdolls or 0) + 1
+            if selfTest ~= "" or P.unRagdolls == 1 then log("other player's body: undid the game's hit ragdoll/death state (" .. P.unRagdolls .. ")") end
+        end
+    end) end
     local okS, sim = pcall(function() return P.mesh:IsSimulatingPhysics(FName("Pelvis")) end)
     if okS and sim then
         pcall(function()
@@ -1369,6 +1472,26 @@ local function updatePuppet(v)
         end
         pcall(function() P.ctrl:SetControlRotation({ Pitch = headPitch, Yaw = headYaw, Roll = 0 }) end)
         local ry = puppet:K2_GetActorRotation().Yaw
+        -- A bullet hit wakes the NPC's own hit reaction / turn-to-attacker logic and the body spun at
+        -- 700-1600 deg/s (0.8.4 test). The body may turn at most 400 deg/s; anything faster is undone.
+        if P.bodyYaw and not selfTest:find("noguard", 1, true) then
+            local maxStep = 400 * dt
+            local step = normAxis(ry - P.bodyYaw)
+            if math.abs(step) > maxStep then
+                -- not the game's spin: turn towards where the player really looks, at a human speed
+                local want = normAxis(headYaw - P.bodyYaw)
+                ry = normAxis(P.bodyYaw + math.max(-maxStep, math.min(maxStep, want)))
+                setRot = true
+            end
+        end
+        if selfTest ~= "" and EX.puppetHitAt and frameNo - EX.puppetHitAt == 60 then
+            local function g(f) local ok, r = pcall(f) return ok and tostring(r) or "?" end
+            log("after-hit state: RotationMode " .. g(function() return puppet.RotationMode end) .. ", MovementState " .. g(function() return puppet.MovementState end)
+                .. ", UseControllerYaw " .. g(function() return puppet.bUseControllerRotationYaw end) .. ", OrientToMovement " .. g(function() return P.cm.bOrientRotationToMovement end)
+                .. ", MovementMode " .. g(function() return P.cm.MovementMode end) .. ", ctrl yaw " .. g(function() return P.ctrl:GetControlRotation().Yaw end)
+                .. ", ragdoll " .. g(function() return puppet.Ragdoll end) .. ", dead " .. g(function() return puppet.Dead end))
+        end
+        if EX.puppetHitAt and frameNo - EX.puppetHitAt < 240 and frameNo % 5 == 0 then EX.silenceController(P.ctrl) end
         -- safety net: never leave the body facing far away from the head for long
         local off = normAxis(headYaw - ry)
         P.farFrames = math.abs(off) > 110 and (P.farFrames or 0) + 1 or 0
@@ -1410,6 +1533,18 @@ local function updatePuppet(v)
         end)
     end
     P.lastX, P.lastY = v[22], v[23]
+    -- spin detector (developer self-test "spin" only): the body turning much faster than a head ever does
+    if selfTest:find("spin", 1, true) then pcall(function()
+        local yawNow = puppet:K2_GetActorRotation().Yaw
+        local meshYaw = P.mesh:K2_GetComponentRotation().Yaw
+        if P.lastYaw then
+            local rate = math.abs(normAxis(yawNow - P.lastYaw)) / dt
+            local mrate = math.abs(normAxis(meshYaw - (P.lastMeshYaw or meshYaw))) / dt
+            P.spinFrames = (rate > 400 or mrate > 400) and (P.spinFrames or 0) + 1 or 0
+            if P.spinFrames == 5 then log(string.format("SPIN detected on the other player's body: actor %.0f deg/s, mesh %.0f deg/s, head yaw %.0f", rate, mrate, headYaw)) end
+        end
+        P.lastYaw, P.lastMeshYaw = yawNow, meshYaw
+    end) end
     syncMovementBase(puppet, P.cm)
     local crouch = (v[3] - v[24] < 120) and 1 or 0                         -- crouch when the real head is low
     if crouch ~= P.crouch then
@@ -1466,6 +1601,12 @@ local function updatePuppet(v)
                                            Rotation = { X = 0, Y = 0, Z = 0, W = 1 }, Scale3D = { X = 1, Y = 1, Z = 1 } }
             P.anim.DragonLookAlpha = 1.0
         end)
+        -- arms: the NPC animation's own two-bone IK nodes reach for the controllers (no extra mesh)
+        local okA, eA = pcall(EX.animArmIK, P, v, flags)
+        if not okA then
+            P.armErrors = (P.armErrors or 0) + 1
+            if P.armErrors == 1 or P.armErrors % 600 == 0 then log("arm IK (anim graph) error: " .. tostring(eA)) end
+        end
     end
 
     -- held items (gun / magazine / melee) exactly where they are in the other player's hands
@@ -1473,7 +1614,8 @@ local function updatePuppet(v)
     local okHR, eHR = pcall(updateHeldItem, "R", (flags & 8) ~= 0, v[36], v[37], v[38], v[39], v[40], v[41], v[42])
     if (not okHL or not okHR) and frameNo % 300 == 0 then log("held item display error: " .. tostring(eHL) .. " / " .. tostring(eHR)) end
     if selfTest ~= "" and frameNo % 450 == 0 then
-        log(string.format("held debug: flags %d, remote R parts %d/%d", flags, #remoteHeld.R.parts, remoteHeld.R.n))
+        log(string.format("held debug: flags %d, remote R parts %d/%d, class %s, failedVer %s/%s, shown %s, okR %s %s", flags, #remoteHeld.R.parts, remoteHeld.R.n,
+            tostring(remoteHeld.R.class), tostring(remoteHeld.R.failedVer), tostring(remoteHeld.R.ver), tostring(heldShown.R ~= nil), tostring(okHR), tostring(eHR)))
     end
     if EX.remoteLook then
         local okD, eD = pcall(EX.dress, puppet, P.pose or P.mesh, EX.remoteLook)
@@ -1482,6 +1624,15 @@ local function updatePuppet(v)
     local okL, eL = pcall(EX.updateRemoteLights, v)
     if not okL and frameNo % 300 == 0 then log("remote lights error: " .. tostring(eL)) end
 
+    if selfTest ~= "" and frameNo % 150 == 0 and not P.pose then
+        pcall(function()
+            local lh = P.mesh:GetSocketLocation(FName("hand_l"))
+            local rh = P.mesh:GetSocketLocation(FName("hand_r"))
+            local function d(h, t) return t and math.sqrt(dist2(h.X, h.Y, h.Z, t[1], t[2], t[3])) or -1 end
+            log(string.format("arm check (anim graph IK): left hand %.0f cm from its target, right hand %.0f cm | right controller Z %.0f, hand Z %.0f",
+                d(lh, P.armTl), d(rh, P.armTr), v[17], rh.Z))
+        end)
+    end
     if selfTest ~= "" and frameNo % 450 == 0 and P.pose then
         pcall(function()
             local hb = boneT(P.pose, "Head")
@@ -2212,6 +2363,8 @@ end
 --    some run for it, some give up (the game's own surrender / beg-for-life behaviour)
 EX.npcInfo = {}     -- id -> { hp0, emptySince, fled, loot }
 EX.SMART_AI_ACTIONS = false
+EX.loadedClasses = {}
+EX.pendingClass = {}
 EX.deaths = {}      -- recent NPC deaths { x, y, z, frame }
 
 function EX.reportNoise(x, y, z, loud)
@@ -3336,7 +3489,27 @@ local function handleGame(line)
         local side, n, ms = rest:match("^([LR]) (%d+) (%S+)")
         if side then
             local old = remoteHeld[side]
-            remoteHeld[side] = { ver = old.ver + 1, n = tonumber(n), ms = tonumber(ms) or 1, parts = {} }
+            remoteHeld[side] = { ver = old.ver + 1, n = tonumber(n), ms = tonumber(ms) or 1, parts = {}, class = EX.pendingClass[side] }
+        end
+    elseif kind == "heldclass" then
+        -- heldclass <L|R> <class path>: load that item's blueprint so its meshes exist here
+        local side, path = rest:match("^([LR]) (%S+)")
+        if side and path then EX.pendingClass[side] = nil end
+        if side and path and path:sub(1, 6) == "/Game/" and EX.loadedClasses[path] then EX.pendingClass[side] = path remoteHeld[side].class = path remoteHeld[side].failedVer = nil end
+        if side and path and path:sub(1, 6) == "/Game/" and not EX.loadedClasses[path] and not selfTest:find("noclass", 1, true) then
+            EX.loadedClasses[path] = true
+            local pkg = path:match("^(.-)%.") or path
+            local bp = pkg .. "." .. (pkg:match("([^/]+)$") or "")
+            local tries = {}
+            for _, what in ipairs({ path, bp, pkg }) do
+                if valid(StaticFindObject(path)) then break end
+                local okL, r = pcall(LoadAsset, what)
+                tries[#tries + 1] = what:match("([^/]+)$") .. (okL and "" or (" err " .. tostring(r)))
+            end
+            EX.pendingClass[side] = path
+            remoteHeld[side].class = path
+            log("loaded the other player's item class " .. path .. (valid(StaticFindObject(path)) and " (ok)" or (" (not found; tried " .. table.concat(tries, ", ") .. ")")))
+            remoteHeld[side].failedVer = nil
         end
     elseif kind == "heldpart" then
         -- heldpart <L|R> <i> <mesh path> <K|S> <rel x y z> <rel quat x y z w> <scale>

@@ -51,6 +51,13 @@ static PoseFrame scripted_pose(const std::string& pattern, double t) {
   };
   f.left = hand(-1, 0);
   f.right = hand(1, wave);
+  if (pattern == "reach") {
+    // big arm movements: left hand sweeps from the hip to overhead, right hand reaches far out to the side and front
+    float fx = std::cos(face), fy = std::sin(face), rx = -fy, ry = fx;
+    float a = (float)std::sin(t * 1.1), b = (float)std::sin(t * 0.8 + 1.0);
+    f.left.p = {head.x + fx * (25 + 20 * a) - rx * 25, head.y + fy * (25 + 20 * a) - ry * 25, head.z - 70 + 95 * (a * 0.5f + 0.5f)};
+    f.right.p = {head.x + fx * (30 + 30 * b) + rx * (20 + 35 * (1 - b)), head.y + fy * (30 + 30 * b) + ry * (20 + 35 * (1 - b)), head.z - 30 + 20 * b};
+  }
   f.body = {{head.x, head.y, head.z - 165.0f}, q};  // floor point under the head (same as the game sends)
   return f;
 }
@@ -72,6 +79,7 @@ int main(int argc, char** argv) {
   // --fake-npc (host): pretend the host's game has one NPC walking back and forth 3 m in front of
   // the origin, which dies 40 s after connecting. Exercises the client's NPC mirroring.
   bool fake_npc = false;
+  std::string hold_class;  // --hold-class <blueprint class path>: sent first, like the game does
   std::string hold_mesh;  // --hold <skeletal mesh path>: "hold" it in the right hand like a gun
   bool hold_sent = false;
   double last_npc = 0, connected_at = -1;
@@ -93,6 +101,7 @@ int main(int argc, char** argv) {
     else if (a == "--game") game_line = next();
     else if (a == "--fake-npc") fake_npc = true;
     else if (a == "--hold") hold_mesh = next();
+    else if (a == "--hold-class") hold_class = next();
     else if (a == "--at") { g_at_x = (float)atof(next().c_str()); g_at_y = (float)atof(next().c_str()); }
     else if (a == "--yaw") g_yaw = (float)atof(next().c_str());
     else if (a == "--no-hands") g_no_hands = true;
@@ -157,6 +166,7 @@ int main(int argc, char** argv) {
           // same lines the game sends: part count, then one line per mesh part (relative transform)
           NetEvent e;
           e.type = EventType::Game;
+          if (!hold_class.empty()) { e.s1 = "heldclass R " + hold_class; ses.send_event(e); }
           e.s1 = "held R 1 1.000";
           ses.send_event(e);
           e.s1 = "heldpart R 1 " + hold_mesh + (hold_mesh.find("/SM_") != std::string::npos ? " S" : " K") + " 0 0 0 0 0 0 1 1.000";

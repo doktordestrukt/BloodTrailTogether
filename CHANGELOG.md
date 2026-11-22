@@ -4,6 +4,19 @@ Versioning: [Semantic Versioning](https://semver.org). The version lives in `CMa
 `release.json` and `Scripts/main.lua` (the release script refuses to build if they differ).
 The network protocol version (`kProtocolVersion`) changes only when old and new clients can no longer talk.
 
+## [0.8.5] - 2026-11-22
+### Fixed
+- Crash on the joining player's side about a minute after connecting (reproduced with 0.8.4 every time):
+  caused by the pose-copy mesh used for arm tracking. That mesh is gone.
+- Arms follow the controllers for both players, also on the host with live AI NPCs: the NPC animation's
+  own hand IK nodes are pointed at the controllers (no extra mesh).
+- Other player's gun invisible when your game had never loaded that gun: the item's class is now sent
+  and loaded, and a copy of the real item (inert, no collision) is shown if its meshes still aren't found.
+- Other player's body spinning at up to 1600 deg/s after being shot: a hit put it into the game's ragdoll
+  state and eventually marked it dead locally. That state is undone at once; turning is capped at 400 deg/s.
+### Changed
+- The other player's head follows via the game's look-at; finger curls are no longer shown.
+
 ## [0.8.4] - 2026-11-22
 ### Changed
 - Third person turned off: in VR the camera ended up inside your own head.
