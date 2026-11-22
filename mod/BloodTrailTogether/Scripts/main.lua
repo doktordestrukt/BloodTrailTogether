@@ -7,7 +7,7 @@
 -- Everything that touches the game is wrapped in pcall: a failure disables that feature and is
 -- logged to UE4SS.log / BloodTrailTogether.log instead of crashing the game.
 
-local VERSION = "0.8.2"
+local VERSION = "0.8.3"
 local TAG = "[BloodTrailTogether] "
 local UEHelpers = require("UEHelpers")
 
@@ -3067,6 +3067,8 @@ function EX.saveSettings()
 end
 pcall(EX.loadSettings)
 EX.settings.share = true  -- sharing your sounds is how multiplayer is meant to sound: always on at start
+-- with the watch menu gone there is no in-game switch, so everything it controlled is on
+EX.settings.tags, EX.settings.bars, EX.settings.fx, EX.settings.subs, EX.settings.spectate = true, true, true, true, true
 EX.shareApplied = false   -- tell the DLL the remembered "share my sounds" setting once
 
 EX.HOLO = { R = 70, G = 225, B = 255 }          -- hologram cyan
@@ -3606,7 +3608,8 @@ local function frame()
         if not ok then log("reply handling failed: " .. tostring(err)) end
     end
     pcall(updateNote)
-    pcall(EX.wristTick)
+    -- 0.8.3: the wrist hologram (status + menu) is off - it floated in front of players' view.
+    -- Everything it did is in the F9 window on the PC.
     pcall(EX.connectionWarning)
     pcall(EX.spectateTick, EX.myDead == true)
     local okTP, eTP = pcall(EX.thirdTick)
