@@ -1,24 +1,189 @@
-MIT License
+BloodTrail Together Source-Available License, version 1.0
 
-Copyright (c) 2026 BloodTrail Together contributors
+Copyright (c) 2026 doktordestrukt (aka ellie). All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This is not an open-source license. The Software is published so that people
+can read it, study it and use it. It is not published so that people can
+re-publish it.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. Definitions
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+"Author" means doktordestrukt (aka ellie), the copyright holder.
 
-BloodTrail Together is an unofficial fan modification. It is not affiliated with,
-endorsed by or supported by Electrovore, LLC. BloodTrail is a trademark of its owner.
+"Software" means everything in the Official Repository: the BloodTrail
+Together source code, compiled binaries (including btt_core.dll and the
+installer), Lua scripts, tools, tests, artwork and documentation, in any
+version, and any part, translation, port or compiled, decompiled or
+disassembled form of them.
+
+"Official Repository" means the GitHub repository the Author publishes the
+Software in, and its GitHub release pages.
+
+"Modified Version" means anything that copies, changes, adapts, translates,
+ports, rebuilds, recompiles or patches the Software or any part of it, or is
+derived from it, in source or binary form.
+
+"User Content" means anything that is not part of the Software, including
+other mods, configuration, names, outfits, chat, voice, gameplay and anything
+else other players send, show or do while using the Software.
+
+"Distribute" means to make available to anyone other than yourself by any
+means, including uploading, hosting, mirroring, re-uploading, attaching,
+bundling, sharing a link to a copy that is not in the Official Repository,
+or including the Software in a modpack, installer, mod manager or other
+package.
+
+2. What you may do
+
+Subject to every condition of this License, the Author grants you a
+personal, non-exclusive, non-transferable, non-sublicensable, revocable,
+free-of-charge permission to:
+
+  a. view and read the Software on GitHub;
+  b. download the Software from the Official Repository only;
+  c. install and use the Software, unmodified, with your own legitimate copy
+     of BloodTrail, on your own computer, including to play online sessions
+     with other players;
+  d. decompile, disassemble, debug and otherwise study the Software,
+     including its compiled binaries, for the purpose of understanding how it
+     works, finding bugs or reporting security issues;
+  e. make changes to your own private copy for your own personal testing, as
+     long as the changed copy is never Distributed and is never shown in
+     public as source code; and
+  f. fork the Official Repository on GitHub only to the extent the GitHub
+     Terms of Service require, and only to prepare a pull request back to the
+     Official Repository. A fork must not be used to publish, promote or
+     distribute a Modified Version, and must be deleted or brought back in
+     line with the Official Repository if the Author asks.
+
+3. What you may not do
+
+Anything this License does not expressly permit is forbidden. In
+particular, without the Author's prior written permission you may not:
+
+  a. Distribute the Software, or any copy of it, anywhere other than through
+     the Official Repository on GitHub. This includes other code hosts, mod
+     sites (such as Nexus Mods), the Steam Workshop, file sharing sites,
+     Discord, forums and video descriptions;
+  b. publish, Distribute or publicly display a Modified Version, in source
+     or binary form, on any platform, including GitHub;
+  c. publish decompiled, disassembled or reconstructed source code of the
+     Software, in whole or in substantial part;
+  d. sell, rent, lease, license, charge for access to, or otherwise make
+     money from the Software or a Modified Version, including putting it
+     behind a paywall, donation gate or subscription;
+  e. remove, hide or change the copyright notice, the Author's name, this
+     License or any credit to the Author;
+  f. claim that you wrote the Software, or that the Author endorses you,
+     your project or your content;
+  g. use the Software or any part of it to build a competing multiplayer
+     mod, loader, framework or product that you Distribute;
+  h. use the Software to cheat in, attack, or gain unauthorised access to
+     any game, server, account, network service or computer, to disrupt or
+     abuse the network services it connects to, or to evade anti-cheat
+     systems;
+  i. get around any condition of this License by indirect means, such as
+     asking someone else to do what you may not do, splitting the Software
+     into parts, renaming it, or using an automated tool to rewrite it.
+
+Short quotations of the Software in a bug report, issue, pull request or
+discussion about the Software are allowed.
+
+4. Contributions
+
+If you send a pull request, patch, issue or other contribution to the
+Official Repository, you confirm you have the right to do so, and you grant
+the Author a perpetual, worldwide, irrevocable, royalty-free right to use,
+change, relicense and Distribute it as part of the Software. You do not gain
+any other right in the Software by contributing.
+
+5. Other players, User Content and online services
+
+The Software connects players over the internet and shows what other players
+do, say and choose. The Author does not create, review, approve, host,
+control or endorse any User Content or any other player, and is not
+responsible or liable for any User Content or for anything anyone does with
+the Software, including:
+
+  a. names, outfits, behaviour or other content from other players that is
+     harmful, offensive, illegal or that infringes anyone's rights;
+  b. damage, data loss, crashes, save problems, bans, account actions,
+     security problems or any other harm caused by the Software, by other
+     mods, or by the way anyone uses the Software;
+  c. sessions, communities or projects run by anyone other than the Author;
+  d. the availability, cost, limits or behaviour of the third-party online
+     services the Software uses to connect players.
+
+You alone are responsible for the content you make or share, for who you
+play with, and for following the terms of the games, services and platforms
+you use.
+
+6. Third-party components
+
+The installer can install UE4SS (MIT License), which remains under its own
+license. The Software connects to Unity Gaming Services (Relay, Lobby and
+Authentication) over their public network interfaces and contains no Unity
+code; use of those services is subject to Unity's terms. These components
+are listed in THIRD_PARTY_NOTICES.md. This License does not limit any right
+their own licenses give you to those parts on their own, and does not give
+you any right in them that their own licenses do not give. BloodTrail
+Together is an unofficial fan project and is not affiliated with or endorsed
+by Electrovore, LLC, Unity Technologies or the UE4SS team.
+
+7. No warranty
+
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, SECURITY AND
+NON-INFRINGEMENT. YOU USE THE SOFTWARE ENTIRELY AT YOUR OWN RISK.
+
+8. Limitation of liability
+
+TO THE FULLEST EXTENT PERMITTED BY LAW, IN NO EVENT WILL THE AUTHOR OR ANY
+CONTRIBUTOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL OR EXEMPLARY, INCLUDING
+LOSS OF DATA, LOSS OF ACCESS TO ACCOUNTS OR GAMES, HARDWARE OR SOFTWARE
+DAMAGE, OR LOSS OF PROFITS, ARISING FROM OR IN CONNECTION WITH THE SOFTWARE,
+ANY USER CONTENT, OR THIS LICENSE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+DAMAGE.
+
+9. Indemnity
+
+You agree to defend and hold the Author harmless from any claim, loss or
+cost, including reasonable legal fees, that arises from your use of the
+Software, your User Content, or your breach of this License.
+
+10. Termination and enforcement
+
+Your permission under this License ends automatically, without notice, the
+moment you break any of its conditions. When it ends you must stop using the
+Software and delete every copy you have, including any Modified Version.
+Copies or Modified Versions Distributed or published in breach of this
+License may be removed through copyright takedown notices (such as DMCA
+notices) and any other remedy available by law. The Author may also end your
+permission at any time for any reason by telling you. Sections 3, 5 and 7 to
+13 continue to apply after your permission ends.
+
+11. Changes to this License
+
+The Author may publish a new version of this License in the Official
+Repository. A new version applies to every version of the Software released
+after it is published. Nothing in this License gives anyone a right to use
+an older version under terms the Author did not grant.
+
+12. Reservation of rights
+
+The Author keeps every right not expressly granted in this License. No right
+is granted by implication, estoppel, past conduct or failure to enforce. If
+the Author does not enforce a condition, that is not a waiver of it.
+
+13. General
+
+If any part of this License is held unenforceable, that part is changed only
+as much as needed to make it enforceable, and the rest stays in full effect.
+This License is the entire agreement about the Software between you and the
+Author. Headings are for convenience only. If a translation of this License
+differs from this English text, the English text applies.
+
+For permission to do anything this License does not allow, contact the
+Author through the Official Repository.

@@ -14,6 +14,7 @@
   <img src="https://img.shields.io/badge/players-2-d62a24?style=for-the-badge" alt="2 players">
   <img src="https://img.shields.io/badge/no%20VPN%20%C2%B7%20no%20port%20forwarding-2ea043?style=for-the-badge" alt="no VPN">
   <img src="https://img.shields.io/github/downloads/doktordestrukt/BloodTrailTogether/total?style=for-the-badge&color=6e40c9&label=downloads" alt="downloads">
+  <img src="https://img.shields.io/badge/license-source--available-8e0d0d?style=for-the-badge" alt="source-available license">
 </p>
 
 ---
@@ -72,4 +73,4 @@ Visual Studio 2022 (C++) and Python 3. `build.cmd` builds everything, `btt_tests
 
 ## $\color{#e0504a}{\textsf{Legal}}$
 
-MIT licensed ([LICENSE](LICENSE)). An unofficial fan project, not affiliated with Electrovore, LLC. You need your own legitimate copy of BloodTrail on Steam. Third-party notices: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+**Source-available, not open source** ([LICENSE](LICENSE)): you may download BloodTrail Together from this repository and play with it, and read and study the code. You may **not** re-upload it anywhere else, publish modified versions, or sell it. © 2026 doktordestrukt (aka ellie). An unofficial fan project, not affiliated with Electrovore, LLC. You need your own legitimate copy of BloodTrail on Steam. Third-party notices: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
