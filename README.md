@@ -3,6 +3,10 @@
 </p>
 
 <p align="center">
+  <img src="assets/readme/typing.svg" alt="co-op, PvP, synced gore, hologram watch, character studio" width="900">
+</p>
+
+<p align="center">
   <a href="https://github.com/doktordestrukt/BloodTrailTogether/releases/latest"><img src="assets/readme/btn-download.svg" alt="Download latest" height="56"></a>
   <a href="INSTALLATION.md"><img src="assets/readme/btn-install.svg" alt="Install guide" height="56"></a>
   <a href="https://github.com/doktordestrukt/BloodTrailTogether/issues"><img src="assets/readme/btn-bug.svg" alt="Report a bug" height="56"></a>
@@ -25,6 +29,13 @@
 
 ## $\color{#e0504a}{\textsf{Features}}$
 
+<p align="center">
+  <img src="assets/readme/features.svg" alt="Features" width="900">
+</p>
+
+<details>
+<summary><b>See every feature</b></summary>
+
 | | |
 |---|---|
 | 🧍 **Full-body players** | Your friend is a full human body: head follows their headset, arms follow their controllers, legs walk, strafe and turn, fingers wrap round what they hold. |
@@ -39,6 +50,8 @@
 | 🏆 **Scoreboard and spectating** | Kills, headshots and deaths for both players. Watch your friend while you're dead. |
 | 🎥 **Third person** | An over-the-right-shoulder view (experimental). |
 | 🌐 **Server list** | No codes: host and the game appears in everyone's list. The nearest relay region is chosen automatically. |
+
+</details>
 
 <p align="center">
   <img src="docs/screenshots/character-menu-ellie.png" width="420" alt="Character menu">
@@ -65,7 +78,36 @@ More: [INSTALLATION.md](INSTALLATION.md) · [TROUBLESHOOTING.md](TROUBLESHOOTING
 
 ## $\color{#e0504a}{\textsf{How it works}}$
 
+```mermaid
+flowchart LR
+    A["🥽 Your headset<br/>and controllers"] --> B["UE4SS Lua script<br/>(inside BloodTrail)"]
+    B <-->|"named pipe ~50 µs"| C["btt_core.dll<br/>(networking, F9 window)"]
+    C <-->|"UDP"| R{{"☁️ Unity Relay<br/>nearest region"}}
+    L[("📋 Unity Lobby<br/>server list")] -.-> C
+    R <-->|"UDP"| D["btt_core.dll<br/>(your friend)"]
+    D <--> E["Lua script<br/>(friend's BloodTrail)"]
+    E --> F["🧍 Your body, gun, gore,<br/>sounds and look appear"]
+    style R fill:#5a0a0a,stroke:#ff4a3a,color:#fff
+    style L fill:#2a1010,stroke:#e0504a,color:#fff
+    style F fill:#3a0d0d,stroke:#ff4a3a,color:#fff
+```
+
 `btt_core.dll` (C++, no Unreal headers) handles networking (Unity Relay and Lobby), the animated F9 window and the installer logic. A UE4SS Lua script reads your VR pose every frame and drives the other player's body, gun, gore and effects through the game's own systems. The two talk over a local named pipe (~50 µs per frame). Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+<details>
+<summary><b>FAQ</b></summary>
+
+**Does my friend need the mod too?** Yes, both players install it. It's free and the installer takes a minute.
+
+**Do I need to open ports or use Hamachi?** No. Games go through Unity's relay servers, the same way many online games connect.
+
+**Does it change my game files?** No. It installs next to the game (with UE4SS) and the installer can remove it again.
+
+**Is the ping good?** The nearest relay region is chosen automatically. Expect roughly 40-80 ms in Europe.
+
+**Can I play it alone?** Yes: the smarter NPCs, subtitles and the watch work in single-player too.
+
+</details>
 
 ## $\color{#e0504a}{\textsf{Developers}}$
 
