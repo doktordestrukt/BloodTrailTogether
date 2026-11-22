@@ -7,7 +7,7 @@
 -- Everything that touches the game is wrapped in pcall: a failure disables that feature and is
 -- logged to UE4SS.log / BloodTrailTogether.log instead of crashing the game.
 
-local VERSION = "0.8.3"
+local VERSION = "0.8.4"
 local TAG = "[BloodTrailTogether] "
 local UEHelpers = require("UEHelpers")
 
@@ -2211,6 +2211,7 @@ end
 --  * reading the fight: badly hurt, or friends dropping around them while a player is close ->
 --    some run for it, some give up (the game's own surrender / beg-for-life behaviour)
 EX.npcInfo = {}     -- id -> { hp0, emptySince, fled, loot }
+EX.SMART_AI_ACTIONS = false
 EX.deaths = {}      -- recent NPC deaths { x, y, z, frame }
 
 function EX.reportNoise(x, y, z, loud)
@@ -2260,16 +2261,22 @@ function EX.npcBrain(id, a, dead)
         EX.npcInfo[id] = info
     end
     local l = a:K2_GetActorLocation()
+    if not dead then info.seenAlive = true end
     if dead then
+        -- only a death we saw happen counts (bodies already lying there when we joined do not:
+        -- in 0.8.3 every NPC fled the moment the other player joined)
         if not info.deadSeen then
             info.deadSeen = true
             pcall(EX.npcDied, id)
-            EX.deaths[#EX.deaths + 1] = { l.X, l.Y, l.Z, frameNo }
+            if info.seenAlive then EX.deaths[#EX.deaths + 1] = { l.X, l.Y, l.Z, frameNo } end
             if #EX.deaths > 64 then table.remove(EX.deaths, 1) end
         end
         return
     end
     if frameNo % 27 ~= 0 then return end
+    -- 0.8.4: the NPC actions below (melee chase, scavenging, fleeing, surrendering) are off until they
+    -- are tested in a real game: they fired wrongly in the first real session, just before crashes.
+    if not EX.SMART_AI_ACTIONS then return end
     if status.role == "host" and syncActive() then pcall(EX.meleeBrain, id, a, info, l) end
     -- 1) out of ammo for more than 4 s (the game's own reload would have refilled it): scavenge
     local ammo, maxAmmo = nil, nil
@@ -2958,6 +2965,7 @@ end
 -- still turns the view: the camera's position is set so that, after the game adds your headset's
 -- own movement, the eye ends up behind your shoulder.
 function EX.thirdTick()
+    EX.thirdPerson = false   -- 0.8.4: off - in VR the camera ended up inside your own head (first real test)
     local want = EX.thirdPerson and not EX.spectating and not EX.myDead
     local pc = getPC()
     local pawn = getPawn()

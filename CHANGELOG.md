@@ -4,6 +4,13 @@ Versioning: [Semantic Versioning](https://semver.org). The version lives in `CMa
 `release.json` and `Scripts/main.lua` (the release script refuses to build if they differ).
 The network protocol version (`kProtocolVersion`) changes only when old and new clients can no longer talk.
 
+## [0.8.4] - 2026-11-22
+### Changed
+- Third person turned off: in VR the camera ended up inside your own head.
+- Smarter-NPC actions (melee chase, scavenging, fleeing, surrendering) turned off until tested in a real game.
+### Fixed
+- NPCs no longer all flee when a player joins (bodies already lying there counted as fresh deaths).
+
 ## [0.8.3] - 2026-11-22
 ### Changed
 - Wrist hologram (status + menu) disabled: it blocked the view in VR. Watch-controlled settings forced on.
