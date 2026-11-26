@@ -9,6 +9,9 @@
 // It sends scripted VR tracking (head + both hands), answers sounds with an echo, follows maps,
 // and prints connection statistics once per second.
 #include <windows.h>
+#include <map>
+#include <sstream>
+#include <vector>
 
 #include <cmath>
 #include <cstdio>
@@ -79,6 +82,11 @@ int main(int argc, char** argv) {
   // --fake-npc (host): pretend the host's game has one NPC walking back and forth 3 m in front of
   // the origin, which dies 40 s after connecting. Exercises the client's NPC mirroring.
   bool fake_npc = false;
+  bool npc_died = false;
+  std::string npc_pose_arg;  // --npc-pose "21 numbers": a real ragdoll pose (7 bones x/y/z) recorded from a host game
+  std::map<std::string, int> state_counts;
+  std::map<std::string, std::string> state_last;
+  double last_state_report = 0;
   std::string hold_class;  // --hold-class <blueprint class path>: sent first, like the game does
   std::string hold_mesh;  // --hold <skeletal mesh path>: "hold" it in the right hand like a gun
   bool hold_sent = false;
@@ -100,6 +108,7 @@ int main(int argc, char** argv) {
     else if (a == "--sound") sound_path = next();
     else if (a == "--game") game_line = next();
     else if (a == "--fake-npc") fake_npc = true;
+    else if (a == "--npc-pose") npc_pose_arg = next();
     else if (a == "--hold") hold_mesh = next();
     else if (a == "--hold-class") hold_class = next();
     else if (a == "--at") { g_at_x = (float)atof(next().c_str()); g_at_y = (float)atof(next().c_str()); }
@@ -191,14 +200,51 @@ int main(int argc, char** argv) {
       if (connected_at < 0) connected_at = now;
       last_npc = now;
       double t = now - connected_at;
+      // scripted NPC on the unreliable state channel (protocol 4): walk 0-15 s, crouch 15-25 s,
+      // knocked down 25-35 s (lying pose), walk 35-45 s, dies at 45 s (reliable) and lies as a corpse
       double x = 300.0, y = 150.0 * std::sin(t * 0.3), vy = 45.0 * std::cos(t * 0.3);
-      int dead = t > 40.0 ? 1 : 0;
-      NetEvent e;
-      e.type = EventType::Game;
-      char b[160];
-      snprintf(b, sizeof(b), "npc 1 %.1f %.1f 92.0 180.0 0 %.0f %d", x, y, dead ? 0.0 : vy, dead);
-      e.s1 = b;
-      ses.send_event(e);
+      int stance = (t > 15 && t < 25) ? 1 : 0;
+      bool down = t > 25 && t < 35, dead = t > 45;
+      if (down || dead) { y = 150.0 * std::sin(25 * 0.3); vy = 0; }
+      char pose[640];
+      snprintf(pose, sizeof(pose), "%.0f %.0f 15 %.0f %.0f 15 %.0f %.0f 14 %.0f %.0f 10 %.0f %.0f 10 %.0f %.0f 8 %.0f %.0f 8 %.0f %.0f 12 %.0f %.0f 12 %.0f %.0f 10 %.0f %.0f 10",
+               x, y, x + 25, y, x + 55, y, x + 30, y - 30, x + 30, y + 30, x - 80, y - 15, x - 80, y + 15,
+               x + 20, y - 25, x + 20, y + 25, x - 40, y - 12, x - 40, y + 12);
+      if (!npc_pose_arg.empty()) {
+        // the recorded pose, moved so its pelvis is where the scripted NPC went down
+        // any number of bones (x y z each), as many as the game's EX.POSE_BONES sends
+        std::vector<float> v;
+        {
+          std::istringstream in(npc_pose_arg);
+          float f;
+          while (in >> f) v.push_back(f);
+        }
+        if (v.size() >= 3 && v.size() % 3 == 0) {
+          double dx = x - v[0], dy = y - v[1];
+          std::string out;
+          for (size_t i = 0; i < v.size() / 3; ++i) {
+            char one[64];
+            snprintf(one, sizeof(one), "%s%.0f %.0f %.0f", i ? " " : "", v[i * 3] + dx, v[i * 3 + 1] + dy, v[i * 3 + 2]);
+            out += one;
+          }
+          snprintf(pose, sizeof(pose), "%s", out.c_str());
+        }
+      }
+      char b[900];
+      if (dead) {
+        if (!npc_died) {
+          NetEvent d;
+          d.type = EventType::Game;
+          d.s1 = "npc 1 0 0 0 0 0 0 1";
+          ses.send_event(d);
+          npc_died = true;
+          BTT_INFO("fake NPC died");
+        }
+        snprintf(b, sizeof(b), "npcbody 1 %s", pose);
+      } else {
+        snprintf(b, sizeof(b), "npc 1 %.1f %.1f 92.0 180.0 0 %.0f 0 %d %d%s%s", x, y, vy, stance, down ? 1 : 0, down ? " " : "", down ? pose : "");
+      }
+      ses.send_state("n1", b);
     }
     if (!game_line.empty() && ses.state() == SessionState::Connected && now - last_game > 10.0 && now - start > 15.0) {
       last_game = now;
@@ -207,6 +253,11 @@ int main(int argc, char** argv) {
       e.s1 = game_line;
       ses.send_event(e);
       BTT_INFO("sent game event: %s", game_line.c_str());
+    }
+    if (now - last_state_report > 3.0 && !state_counts.empty()) {
+      last_state_report = now;
+      for (auto& kv : state_counts) BTT_INFO("peer state: %d x %s, latest: %s", kv.second, kv.first.c_str(), state_last[kv.first].c_str());
+      state_counts.clear();
     }
     std::vector<NetEvent> evs;
     ses.pop_events(evs);
@@ -230,7 +281,13 @@ int main(int argc, char** argv) {
         ses.send_event(echo);
         ++sounds_echoed;
       } else if (e.type == EventType::Game) {
-        BTT_INFO("peer game event: %s", e.s1.c_str());
+        std::string kind = e.s1.substr(0, e.s1.find(' '));
+        if (kind == "npc" || kind == "npcbody" || kind == "npcdrag" || kind == "prop") {
+          ++state_counts[kind];  // high-rate state: summarised below instead of one line each
+          state_last[kind] = e.s1;
+        } else {
+          BTT_INFO("peer game event: %s", e.s1.c_str());
+        }
       } else if (e.type == EventType::Notice) {
         BTT_INFO("peer notice: %s", e.s1.c_str());
       }

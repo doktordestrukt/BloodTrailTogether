@@ -4,6 +4,23 @@ Versioning: [Semantic Versioning](https://semver.org). The version lives in `CMa
 `release.json` and `Scripts/main.lua` (the release script refuses to build if they differ).
 The network protocol version (`kProtocolVersion`) changes only when old and new clients can no longer talk.
 
+## [0.9.0] - 2026-11-26
+Network protocol 4: both players must update.
+### Added
+- Unreliable latest-wins state channel in the session layer (`send_state`): only the newest line per
+  key is delivered, never an older one after a newer one; repeated twice a second for 3 s after the
+  last change so final states arrive despite loss. Unit-tested at 0-25 % loss.
+- NPC sync carries stance (crouch) and knocked-down state; a knocked-down NPC ragdolls in the other
+  game too and follows the host's pose, then gets up when the host's NPC does.
+- Corpse sync follows 11 bodies (pelvis, chest, head, elbows, hands, knees, feet) instead of the pelvis
+  only. Measured with a recorded real ragdoll pose: every bone within 6-27 cm.
+### Changed
+- NPC positions, corpses, dragged bodies and thrown props moved from the reliable channel to the state
+  channel (no more head-of-line blocking of hits/deaths under packet loss). NPC update rate 10 -> 15 Hz.
+- Late or reordered state can no longer revive a dead NPC or re-create a removed one.
+### Fixed
+- Developer self-test spawned NPCs inside the floor when no headset was connected.
+
 ## [0.8.5] - 2026-11-22
 ### Fixed
 - Crash on the joining player's side about a minute after connecting (reproduced with 0.8.4 every time):

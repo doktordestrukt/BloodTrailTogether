@@ -210,6 +210,12 @@ void NetEngine::send_game(const std::string& line) {
   session_->send_event(std::move(e));
 }
 
+void NetEngine::send_state(const std::string& key, const std::string& line) {
+  std::lock_guard<std::mutex> lk(mu_);
+  if (!session_ || session_->state() != SessionState::Connected) return;
+  session_->send_state(key, line);
+}
+
 bool NetEngine::remote_pose(PoseFrame& out) {
   std::lock_guard<std::mutex> lk(mu_);
   if (!session_) return false;

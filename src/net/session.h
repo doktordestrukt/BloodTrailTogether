@@ -11,7 +11,7 @@
 
 namespace btt {
 
-constexpr uint16_t kProtocolVersion = 3;  // 3: held-item transforms; 2: body transform, Game events
+constexpr uint16_t kProtocolVersion = 4;  // 4: unreliable latest-wins state channel  // 3: held-item transforms; 2: body transform, Game events
 
 enum class Role : uint8_t { Host = 1, Client = 2 };
 
@@ -62,6 +62,12 @@ class Session {
   void update(double now);
   void set_local_pose(const PoseFrame& f);
   void send_event(NetEvent ev);
+  // Unreliable, latest-wins state for continuously changing things (NPC positions, corpses, dragged
+  // bodies, thrown props). Only the newest line per key matters: an old one is never delivered after
+  // a newer one, lost lines are not resent, but a line is repeated twice a second for 3 s after it
+  // last changed so the final state (a corpse at rest) arrives even with packet loss. Delivered to
+  // the other side as a Game event. Keeps the reliable channel free of high-rate traffic.
+  void send_state(const std::string& key, const std::string& line);
   void pop_events(std::vector<NetEvent>& out);
   bool sample_remote(double now, PoseFrame& out) const;
 
@@ -114,6 +120,16 @@ class Session {
   std::map<uint16_t, std::vector<uint8_t>> rel_buf_;
   std::vector<NetEvent> inbox_;
 
+  // unreliable state
+  struct StateOut {
+    std::string line;
+    uint16_t seq = 0;
+    double last_sent = -1, changed_at = 0;
+    bool dirty = true;
+  };
+  std::map<std::string, StateOut> state_out_;
+  std::map<std::string, uint16_t> state_in_;
+  uint16_t state_seq_ = 0;
   // pose
   PoseFrame local_pose_{};
   bool have_local_pose_ = false;

@@ -4,6 +4,7 @@
 //   H <lua-mod-version>                         handshake (first frame after connecting)
 //   P head(7) left(7) right(7) body(7) heldL(7) heldR(7) flags    local VR pose + body root, world space (cm)
 //   X <game event line>                         reliable game event for the other player's script
+//   U <key> <game event line>                   unreliable latest-wins state (one live line per key)
 //   M <map package path>                        current map, e.g. /Game/Maps/Sandbox/Map_Sandbox
 //   S <asset path> x y z volume pitch           a player-originated sound to share
 //   K <action>                                  hotkey: toggle_window | sim | disconnect
@@ -131,6 +132,11 @@ std::string lua_handle_request(const std::string& req) {
       case 'X':
         if (!rest.empty()) eng->send_game(rest);
         break;
+      case 'U': {
+        size_t sp = rest.find(' ');
+        if (sp != std::string::npos && sp > 0) eng->send_state(rest.substr(0, sp), rest.substr(sp + 1));
+        break;
+      }
       case 'D':
         BTT_INFO("lua: %s", rest.c_str());
         break;

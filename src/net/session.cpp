@@ -17,7 +17,7 @@ constexpr uint8_t kMagic0 = 'B', kMagic1 = 'T', kWireVersion = 1;
 constexpr size_t kHeaderSize = 16;
 constexpr size_t kPacketBudget = 1100;
 
-enum Chunk : uint8_t { CH_POSE = 1, CH_REL = 2, CH_PING = 3, CH_PONG = 4, CH_BYE = 5 };
+enum Chunk : uint8_t { CH_POSE = 1, CH_REL = 2, CH_PING = 3, CH_PONG = 4, CH_BYE = 5, CH_STATE = 6 };
 enum RelMsg : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_EVENT = 3 };
 
 constexpr double kInterruptAfter = 2.0;
@@ -101,6 +101,25 @@ void Session::reset_peer() {
   rel_out_.clear();
   rel_next_ = 0;
   sent_hello_ = false;
+  state_in_.clear();
+  for (auto& kv : state_out_) kv.second.dirty = true;  // the new peer needs the current state
+}
+
+void Session::send_state(const std::string& key, const std::string& line) {
+  if (key.size() > 200 || line.size() > 900) return;
+  StateOut& s = state_out_[key];
+  if (s.line == line && !s.dirty) {
+    s.changed_at = clock_;  // still current: keep it alive
+    return;
+  }
+  s.line = line;
+  s.seq = ++state_seq_;
+  s.dirty = true;
+  s.changed_at = clock_;
+  if (state_out_.size() > 4096) {  // forget the oldest settled entries
+    for (auto it = state_out_.begin(); it != state_out_.end();)
+      it = (!it->second.dirty && clock_ - it->second.changed_at > 10) ? state_out_.erase(it) : std::next(it);
+  }
 }
 
 void Session::set_local_pose(const PoseFrame& f) {
@@ -211,7 +230,15 @@ void Session::flush(double now, bool force) {
   for (auto& r : rel_out_)
     if (r.last_sent < 0 || now - r.last_sent >= rto) { rel_due = true; break; }
   bool keepalive_due = last_tx_ < 0 || now - last_tx_ >= 0.1;
-  if (!(force || pose_due || ping_due || rel_due || keepalive_due)) return;
+  auto state_is_due = [&](const StateOut& s) {
+    return s.dirty || (now - s.changed_at < 3.0 && now - s.last_sent >= 0.5);
+  };
+  bool state_due = false;
+  if (connected)
+    for (auto& kv : state_out_)
+      if (state_is_due(kv.second)) { state_due = true; break; }
+  if (!(force || pose_due || ping_due || rel_due || keepalive_due || state_due)) return;
+  auto st_it = state_out_.begin();
 
   // Pack one or more packets (pose + pings + as many due reliable messages as fit).
   auto rel_it = rel_out_.begin();
@@ -236,6 +263,19 @@ void Session::flush(double now, bool force) {
       }
     }
     bool more = false;
+    for (; connected && st_it != state_out_.end(); ++st_it) {
+      StateOut& s = st_it->second;
+      if (!state_is_due(s)) continue;
+      const std::string& k = st_it->first;
+      size_t body = 2 + k.size() + 2 + 2 + s.line.size();
+      if (w.size() + 3 + body > kPacketBudget) { more = true; break; }
+      w.u8(CH_STATE); w.u16((uint16_t)body);
+      w.u16((uint16_t)k.size()); w.raw((const uint8_t*)k.data(), k.size());
+      w.u16(s.seq);
+      w.u16((uint16_t)s.line.size()); w.raw((const uint8_t*)s.line.data(), s.line.size());
+      s.dirty = false;
+      s.last_sent = now;
+    }
     for (; rel_it != rel_out_.end(); ++rel_it) {
       if (!(rel_it->last_sent < 0 || now - rel_it->last_sent >= rto)) continue;
       size_t need = 3 + 2 + rel_it->body.size();
@@ -329,6 +369,25 @@ void Session::handle_packet(const uint8_t* d, size_t n, double now) {
           uint16_t id;
           memcpy(&id, body, 2);
           handle_rel(id, body + 2, len - 2, now);
+        }
+        break;
+      case CH_STATE:
+        if (state_ == SessionState::Connected || state_ == SessionState::Interrupted) {
+          Reader sr(body, len);
+          uint16_t kl = sr.u16();
+          if (!sr.ok() || kl > sr.left()) break;
+          std::string key((const char*)sr.cur(), kl);
+          sr.skip(kl);
+          uint16_t sq = sr.u16();
+          uint16_t ll = sr.u16();
+          if (!sr.ok() || ll > sr.left()) break;
+          auto it = state_in_.find(key);
+          if (it != state_in_.end() && !seq_less(it->second, sq)) break;  // old or duplicate
+          state_in_[key] = sq;
+          NetEvent e;
+          e.type = EventType::Game;
+          e.s1.assign((const char*)sr.cur(), ll);
+          inbox_.push_back(std::move(e));
         }
         break;
       case CH_BYE:

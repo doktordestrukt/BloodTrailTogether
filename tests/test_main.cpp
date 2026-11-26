@@ -248,6 +248,39 @@ static void test_session(const char* label, ImpairmentParams imp) {
   CHECK(samples > 100);
   CHECK(worst < 6.0 + imp.jitter_ms * 0.15);
 
+  // Unreliable state channel: 60 keys updated at 30 Hz for 1 s, then left alone. The receiver must
+  // never see a value go backwards and must end with the final value of every key (repeats cover loss).
+  {
+    const int K = 60;
+    std::map<std::string, int> last_seen;
+    bool monotonic = true;
+    int frames = 0;
+    double t0 = now, next = now;
+    run_until(5, host, cli, now, 0.002, [&] {
+      if (now - t0 < 1.0 && now >= next) {
+        next = now + 1.0 / 30;
+        ++frames;
+        for (int k = 0; k < K; ++k) host.send_state("npc" + std::to_string(k), "npc " + std::to_string(k) + " " + std::to_string(frames));
+      }
+      std::vector<NetEvent> ev;
+      cli.pop_events(ev);
+      for (auto& e : ev) {
+        int k = -1, v = -1;
+        if (e.type == EventType::Game && sscanf(e.s1.c_str(), "npc %d %d", &k, &v) == 2) {
+          std::string key = "npc" + std::to_string(k);
+          if (last_seen.count(key) && v <= last_seen[key]) monotonic = false;
+          last_seen[key] = v;
+        }
+      }
+      return false;
+    });
+    int final_ok = 0;
+    for (int k = 0; k < K; ++k) final_ok += last_seen["npc" + std::to_string(k)] == frames;
+    printf("  state channel: %d/%d keys ended on the final value, order %s\n", final_ok, K, monotonic ? "kept" : "BROKEN");
+    CHECK(monotonic);
+    CHECK(final_ok == K);
+  }
+
   // Peer restart detection: client goes silent, host must flag interruption.
   run_until(3, host, cli, now, 0.002, [&] { return false; });
   CHECK(host.state() == SessionState::Connected);

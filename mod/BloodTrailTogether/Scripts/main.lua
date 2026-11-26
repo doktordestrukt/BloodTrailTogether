@@ -7,7 +7,7 @@
 -- Everything that touches the game is wrapped in pcall: a failure disables that feature and is
 -- logged to UE4SS.log / BloodTrailTogether.log instead of crashing the game.
 
-local VERSION = "0.8.5"
+local VERSION = "0.9.0"
 local TAG = "[BloodTrailTogether] "
 local UEHelpers = require("UEHelpers")
 
@@ -805,6 +805,9 @@ local lastHitFrame = {}      -- hit cooldowns
 local puppetDownSince = nil  -- frame when the body got knocked into ragdoll while its owner lives
 local selfTest = ""
 local function sendGame(line) outbox[#outbox + 1] = "X " .. line end
+-- Unreliable latest-wins state (protocol 4): only the newest line per key is delivered. For data
+-- that changes continuously (NPC/corpse/drag/prop transforms); events (hits, deaths) use sendGame.
+local function sendState(key, line) outbox[#outbox + 1] = "U " .. key .. " " .. line end
 
 -- Damage as a SHARE of the victim's max health (their game knows its own health scale):
 -- head = dead, chest/pelvis = half, limbs = a third. Heavy rounds hit harder.
@@ -1682,7 +1685,7 @@ end
 -- Client: removes the NPCs its own game spawns and shows AI-less mirrors of the host's NPCs.
 --       Hits the client lands on a mirror show gore immediately and are replayed on the host's real
 --       NPC (which may die there; the mirror then ragdolls). Same gore pipeline on both sides.
-local NPC_SYNC_FRAMES = 9
+local NPC_SYNC_FRAMES = 6
 npcSyncEnabled = true  -- global on purpose: set from the CFG reply
 local npcIdOf = {}        -- host: actor full name -> id
 local npcActor = {}       -- host: id -> real NPC;  client: id -> mirror
@@ -1700,6 +1703,7 @@ local function resetNpcSync()
         if status.role == "client" and valid(a) then pcall(function() a:K2_DestroyActor() end) end
     end
     npcIdOf, npcActor, mirrorIdOf, mirrorTarget, nextNpcId = {}, {}, {}, {}, 1
+    EX.goneIds = {}
 end
 
 -- NPCs are tracked as they are created (NotifyOnNewObject) instead of scanning every object in
@@ -1743,6 +1747,44 @@ end
 
 local lastBodySent = {}   -- host: id -> {x,y,z} of the last corpse position sent
 
+-- Ragdoll pose = a few physics bodies in world space. The other game pulls the same bodies of its
+-- copy towards them with velocities, so the copy keeps real physics (collisions, floppy joints)
+-- while ending up in the same pose.
+EX.POSE_BONES = { "Pelvis", "spine_03", "Head", "hand_l", "hand_r", "foot_l", "foot_r", "lowerarm_l", "lowerarm_r", "calf_l", "calf_r" }
+function EX.bodyPoseString(mesh)
+    local t = {}
+    for i, b in ipairs(EX.POSE_BONES) do
+        local l = mesh:GetSocketLocation(FName(b))
+        t[i] = string.format("%.0f %.0f %.0f", l.X, l.Y, l.Z)
+    end
+    return table.concat(t, " ")
+end
+function EX.parseBodyPose(str)
+    local n, out = 0, {}
+    for v in str:gmatch("%S+") do n = n + 1 out[n] = tonumber(v) end
+    if n < #EX.POSE_BONES * 3 then return nil end
+    return out
+end
+-- velocity-drive each pose bone of `mesh` towards the target pose; returns the worst error (cm)
+function EX.followBodyPose(mesh, pose, gain)
+    local worst = 0
+    for i, b in ipairs(EX.POSE_BONES) do
+        local tx, ty, tz = pose[i * 3 - 2], pose[i * 3 - 1], pose[i * 3]
+        local fb = FName(b)
+        local l = mesh:GetSocketLocation(fb)
+        local ex, ey, ez = tx - l.X, ty - l.Y, tz - l.Z
+        local d2 = ex * ex + ey * ey + ez * ez
+        if d2 > worst then worst = d2 EX.worstBone = b end
+        EX.boneErrs = EX.boneErrs or {}
+        EX.boneErrs[i] = string.format("%s %.0f%s", b, math.sqrt(d2), mesh:IsSimulatingPhysics(fb) and "" or "(no physics)")
+        if d2 > 9 then
+            local g = i > 3 and gain * 1.5 or gain       -- light limbs need a stronger pull than the torso
+            pcall(function() mesh:SetPhysicsLinearVelocity({ X = ex * g, Y = ey * g, Z = ez * g }, false, fb) end)
+        end
+    end
+    return math.sqrt(worst)
+end
+
 local function hostSyncTick()
     local alive = {}
     for _, e in ipairs(liveNpcs()) do
@@ -1754,6 +1796,10 @@ local function hostSyncTick()
                 nextNpcId = nextNpcId + 1
                 npcIdOf[name] = id
                 npcActor[id] = a
+                pcall(function()
+                    local l = a:K2_GetActorLocation()
+                    log(string.format("NPC sync id %d = %s at (%.0f, %.0f, %.0f)", id, name, l.X, l.Y, l.Z))
+                end)
                 installHitHook()
                 EX.installFireHook()
             end
@@ -1767,16 +1813,26 @@ local function hostSyncTick()
                 local r = a:K2_GetActorRotation()
                 local vx, vy = 0, 0
                 pcall(function() local v = a:GetVelocity() vx, vy = v.X, v.Y end)
-                sendGame(string.format("npc %d %.1f %.1f %.1f %.1f %.0f %.0f 0", id, l.X, l.Y, l.Z, r.Yaw, vx, vy))
+                -- stance (0 standing / 1 crouched) and "knocked down" (alive but ragdolling: hit
+                -- reaction or being dragged). 0.8.5 sent only position and yaw, so a crouching or
+                -- knocked-down NPC stood upright in the other game.
+                local stance, down = 0, 0
+                pcall(function() stance = a.Stance or 0 end)
+                pcall(function() if a.Mesh:IsSimulatingPhysics(FName("Pelvis")) then down = 1 end end)
+                local line = string.format("npc %d %.1f %.1f %.1f %.1f %.0f %.0f 0 %d %d", id, l.X, l.Y, l.Z, r.Yaw, vx, vy, stance, down)
+                if down == 1 then
+                    local okP, pose = pcall(EX.bodyPoseString, a.Mesh)
+                    if okP then line = line .. " " .. pose end
+                end
+                sendState("n" .. id, line)
             else
-                -- corpse: stream where the body (pelvis) is while it moves (falling, being dragged)
-                local okP, pl = pcall(function() return a.Mesh:GetSocketLocation(FName("Pelvis")) end)
-                if okP then
-                    local last = lastBodySent[id]
-                    if not last then sendGame(string.format("npc %d %.1f %.1f %.1f 0 0 0 1", id, pl.X, pl.Y, pl.Z)) end
-                    if not last or dist2(last[1], last[2], last[3], pl.X, pl.Y, pl.Z) > 16 then
-                        lastBodySent[id] = { pl.X, pl.Y, pl.Z }
-                        sendGame(string.format("npcbody %d %.1f %.1f %.1f", id, pl.X, pl.Y, pl.Z))
+                -- corpse: the pose of the whole body (pelvis, chest, head, hands, feet) while it moves
+                local okP, pose = pcall(EX.bodyPoseString, a.Mesh)
+                if okP and pose then
+                    if not lastBodySent[id] then sendGame(string.format("npc %d 0 0 0 0 0 0 1", id)) end   -- the death itself: reliable
+                    if lastBodySent[id] ~= pose then
+                        lastBodySent[id] = pose
+                        sendState("n" .. id, string.format("npcbody %d %s", id, pose))
                     end
                 end
             end
@@ -1825,18 +1881,27 @@ local function clientSyncTick()
                 end
                 -- corpse follows the host's corpse (pulled by the pelvis, limbs stay physical),
                 -- except while this player drags or has just thrown it
-                if t.bx and not EX.locallyControlled(id) and not EX.remoteGrab[id] then
-                    pcall(function()
-                        local pl = mesh:GetSocketLocation(FName("Pelvis"))
-                        local ex, ey, ez = t.bx - pl.X, t.by - pl.Y, t.bz - pl.Z
-                        if ex * ex + ey * ey + ez * ez > 9 then
-                            mesh:SetPhysicsLinearVelocity({ X = ex * 8, Y = ey * 8, Z = ez * 8 }, false, FName("Pelvis"))
-                        end
-                    end)
+                if t.pose and not EX.locallyControlled(id) and not EX.remoteGrab[id] then
+                    local okF, err = pcall(EX.followBodyPose, mesh, t.pose, 8)
+                    if okF then t.poseErr = err end
                 end
             else
+                if t.stance ~= t.appliedStance then
+                    t.appliedStance = t.stance
+                    pcall(function() m.DesiredStance = t.stance m.Stance = t.stance end)
+                    pcall(function() mesh:GetAnimInstance().Stance = t.stance end)
+                end
                 local okS, sim = pcall(function() return mesh:IsSimulatingPhysics(FName("Pelvis")) end)
-                if okS and sim then
+                if t.down and not EX.locallyControlled(id) and not EX.remoteGrab[id] then
+                    -- knocked down / dragged on the host: fall the same way here and follow its pose
+                    if not (okS and sim) and not t.downStarted then t.downStarted = true pcall(function() m:RagdollStart() end) end
+                    if t.pose then
+                        local okF, err = pcall(EX.followBodyPose, mesh, t.pose, 8)
+                        if okF then t.poseErr = err end
+                    end
+                    t.downSince = nil
+                elseif okS and sim then
+                    t.downStarted = nil
                     -- knocked down on this side but alive on the host: get up again (not while
                     -- someone is holding it)
                     if EX.locallyControlled(id) or EX.remoteGrab[id] then
@@ -1865,6 +1930,33 @@ local function clientSyncTick()
     end
 end
 
+-- developer self-test: how closely each NPC copy follows the host's NPC
+function EX.mirrorDiag()
+    for id, t in pairs(mirrorTarget) do
+        local m = npcActor[id]
+        if valid(m) then
+            local sim, st, dead = "?", "?", "?"
+            pcall(function() sim = tostring(m.Mesh:IsSimulatingPhysics(FName("Pelvis"))) end)
+            pcall(function() st = tostring(m.Stance) end)
+            local l = m:K2_GetActorLocation()
+            local off = t.x and math.sqrt(dist2(l.X, l.Y, l.Z, t.x, t.y, t.z)) or -1
+            local pelvisErr = "-"
+            if t.pose and (t.dead or t.down) then
+                pcall(function()
+                    local pl = m.Mesh:GetSocketLocation(FName("Pelvis"))
+                    pelvisErr = string.format("%.0f cm", math.sqrt(dist2(pl.X, pl.Y, pl.Z, t.pose[1], t.pose[2], t.pose[3])))
+                end)
+            end
+            local life = "?"
+            pcall(function() life = string.format("%.1f", m:GetLifeSpan()) end)
+            log(string.format("npc copy %d (%s): host says %s%s stance %s | here: physics %s, stance %s, %.0f cm from host position, pelvis error %s, worst bone %s %s, lifespan %s",
+                id, m:GetFName():ToString(), t.dead and "dead" or "alive", t.down and " knocked-down" or "", tostring(t.stance),
+                sim, st, off, pelvisErr, tostring(EX.worstBone), (t.dead or t.down) and t.poseErr and string.format("%.0f cm", t.poseErr) or "-", life))
+            if (t.dead or t.down) and EX.boneErrs then log("  per bone (cm): " .. table.concat(EX.boneErrs, ", ")) end
+        end
+    end
+end
+
 local function npcSyncTick()
     if not syncActive() then
         if syncMap then resetNpcSync() syncMap = nil end
@@ -1876,6 +1968,7 @@ local function npcSyncTick()
         if frameNo % NPC_SYNC_FRAMES == 0 then hostSyncTick() end
     else
         clientSyncTick()
+        if selfTest ~= "" and frameNo % 150 == 0 then pcall(EX.mirrorDiag) end
     end
 end
 
@@ -1911,26 +2004,37 @@ end
 
 local function handleNpcEvent(kind, rest)
     if kind == "npc" and status.role == "client" then
-        local id, x, y, z, yaw, vx, vy, dead = rest:match("^(%d+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%d)")
+        local id, x, y, z, yaw, vx, vy, dead, more = rest:match("^(%d+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%d)(.*)$")
         id = tonumber(id)
-        if not id then return end
+        if not id or (EX.goneIds and EX.goneIds[id]) then return end
         local t = mirrorTarget[id] or {}
         if dead == "1" then
             t.dead = true
-            if not t.x then t.x, t.y, t.z, t.yaw, t.vx, t.vy = tonumber(x), tonumber(y), tonumber(z), 0, 0, 0 end
-        else
+        elseif not t.dead then        -- a late state line never brings a dead NPC back
             t.x, t.y, t.z, t.yaw, t.vx, t.vy = tonumber(x), tonumber(y), tonumber(z), tonumber(yaw), tonumber(vx), tonumber(vy)
-            t.dead = false
+            local stance, down, pose = (more or ""):match("^ (%d) (%d) ?(.*)$")
+            t.stance = tonumber(stance) or 0
+            t.down = down == "1"
+            t.pose = t.down and EX.parseBodyPose(pose or "") or nil
         end
-        mirrorTarget[id] = t
+        if t.x then mirrorTarget[id] = t end
     elseif kind == "npcbody" and status.role == "client" then
-        local id, x, y, z = rest:match("^(%d+) (%S+) (%S+) (%S+)")
-        local t = mirrorTarget[tonumber(id or "")]
-        if t then t.bx, t.by, t.bz = tonumber(x), tonumber(y), tonumber(z) end
+        local id, pose = rest:match("^(%d+) (.*)$")
+        id = tonumber(id or "")
+        if not id or (EX.goneIds and EX.goneIds[id]) then return end
+        local t = mirrorTarget[id] or {}
+        t.dead = true
+        t.pose = EX.parseBodyPose(pose or "")
+        if t.pose and not t.x then t.x, t.y, t.z, t.yaw, t.vx, t.vy = t.pose[1], t.pose[2], t.pose[3] + 90, 0, 0, 0 end
+        if t.x then mirrorTarget[id] = t end
     elseif kind == "npcgone" and status.role == "client" then
         local id = tonumber(rest)
         if id and valid(npcActor[id]) then pcall(function() npcActor[id]:K2_DestroyActor() end) end
-        if id then npcActor[id], mirrorTarget[id] = nil, nil end
+        if id then
+            npcActor[id], mirrorTarget[id] = nil, nil
+            EX.goneIds = EX.goneIds or {}
+            EX.goneIds[id] = true
+        end
     elseif kind == "npchit" then
         local id, bone, ox, oy, oz, lx, ly, lz, causer, ew = rest:match("^(%d+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%d)")
         local target = npcActor[tonumber(id or "")]
@@ -2067,7 +2171,7 @@ function EX.grabTick()
         if frameNo % 3 == 0 then
             pcall(function()
                 local l = g.npc.Mesh:GetSocketLocation(FName(g.bone))
-                sendGame(string.format("npcdrag %d %s %.1f %.1f %.1f", id, g.bone, l.X, l.Y, l.Z))
+                sendState("d" .. id, string.format("npcdrag %d %s %.1f %.1f %.1f", id, g.bone, l.X, l.Y, l.Z))
             end)
         end
     end
@@ -2151,7 +2255,7 @@ function EX.sendProp(path, a)
         local qx, qy, qz, qw = rotToQuat(r.Pitch, r.Yaw, r.Roll)
         local vx, vy, vz = 0, 0, 0
         pcall(function() local v = a:GetVelocity() vx, vy, vz = v.X, v.Y, v.Z end)
-        sendGame(string.format("prop %s %.1f %.1f %.1f %.4f %.4f %.4f %.4f %.0f %.0f %.0f", path, l.X, l.Y, l.Z, qx, qy, qz, qw, vx, vy, vz))
+        sendState("p" .. path, string.format("prop %s %.1f %.1f %.1f %.4f %.4f %.4f %.4f %.0f %.0f %.0f", path, l.X, l.Y, l.Z, qx, qy, qz, qw, vx, vy, vz))
     end)
 end
 
@@ -3701,7 +3805,9 @@ local function frame()
                 pcall(LoadAsset, NPC_PKG)
                 local gs = UEHelpers.GetGameplayStatics()
                 local x, y = localHead[1] + 600 + i * 150, localHead[2] + (i - 1.5) * 300
-                local t = { Rotation = { X = 0, Y = 0, Z = 1, W = 0 }, Translation = { X = x, Y = y, Z = localHead[3] + 20 }, Scale3D = { X = 1, Y = 1, Z = 1 } }
+                -- standing height: 20 cm above the headset, but at least 100 cm (no headset = head at Z 0,
+                -- which spawned NPCs half inside the floor and they fell out of the world)
+                local t = { Rotation = { X = 0, Y = 0, Z = 1, W = 0 }, Translation = { X = x, Y = y, Z = math.max(localHead[3] + 20, 100) }, Scale3D = { X = 1, Y = 1, Z = 1 } }
                 local a = gs:BeginDeferredActorSpawnFromClass(getWorld(), StaticFindObject(NPC_CLASS), t, 1, nil)
                 pcall(function() a.AutoPossessAI = 3 end)   -- placed in world or spawned: gets its AI
                 gs:FinishSpawningActor(a, t)
@@ -3753,6 +3859,22 @@ local function frame()
         end
     end
     -- developer self-test: shoot the first mirrored NPC (client side of NPC sync)
+    -- developer self-test (host): headshot one live AI NPC every ~10 s so it dies and ragdolls
+    if selfTest:find("npckill", 1, true) and status.role == "host" and frameNo % 900 == 0 then
+        for _, m in pairs(npcActor) do
+            local dead = true
+            pcall(function() dead = m.Dead == true end)
+            if valid(m) and not dead then
+                local okT, errT = pcall(function()
+                    local hl = m.Mesh:GetSocketLocation(FName("Head"))
+                    local ok, why = applyBulletHit(m, "Head", hl.X, hl.Y, hl.Z, -1, 0, 0, "ammo_308_b", false)
+                    log("self-test: headshot into a host NPC: " .. tostring(ok) .. " " .. tostring(why or ""))
+                end)
+                if not okT then log("self-test failed: " .. tostring(errT)) end
+                break
+            end
+        end
+    end
     if selfTest:find("npchit", 1, true) and frameNo % 450 == 0 then
         for _, m in pairs(npcActor) do
             if valid(m) and status.role == "client" then

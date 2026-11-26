@@ -65,6 +65,7 @@ class NetEngine {
   void send_notice(const std::string& text);
   void send_world(const std::string& key, const std::string& value);
   void send_game(const std::string& line);  // reliable, opaque to the engine
+  void send_state(const std::string& key, const std::string& line);  // unreliable latest-wins
   void notify_local(const std::string& text) { push_cmd({GameCommand::Notify, text}); }  // note in the headset
 
   // Engine -> game
