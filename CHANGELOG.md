@@ -4,6 +4,21 @@ Versioning: [Semantic Versioning](https://semver.org). The version lives in `CMa
 `release.json` and `Scripts/main.lua` (the release script refuses to build if they differ).
 The network protocol version (`kProtocolVersion`) changes only when old and new clients can no longer talk.
 
+## [0.9.1] - 2026-11-26
+### Added
+- Desktop (keyboard + mouse, BTDesktop mod) and VR players can play together on the same servers:
+  the held-item and hand code now uses the pawn's own grip controllers, which exist without a headset.
+- Weapon moving parts: slide, bolt, magazine and hammer offsets of the held item are streamed while they
+  move (state channel, only parts away from rest), so racking, firing and reloading show on the other side.
+- A held map object (a gun or prop that is part of the map) is put into the other player's hand from the
+  pose stream (30 Hz, smoothed), physics paused, moving parts mirrored; physics comes back on release.
+- Late join: when a player connects, the held items, their moving parts, every corpse (death + pose),
+  moved map objects, health and look are sent again.
+### Fixed
+- Held items were not detected when UE4SS returned the component list as a table of wrapped values:
+  every component failed the visibility check (melee weapons and spawned guns were never sent).
+- Removed reads of `LocallyGrippedObjects` (entries read back invalid and crashed the game).
+
 ## [0.9.0] - 2026-11-26
 Network protocol 4: both players must update.
 ### Added

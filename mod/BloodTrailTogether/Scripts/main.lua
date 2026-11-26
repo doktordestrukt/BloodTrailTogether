@@ -7,7 +7,7 @@
 -- Everything that touches the game is wrapped in pcall: a failure disables that feature and is
 -- logged to UE4SS.log / BloodTrailTogether.log instead of crashing the game.
 
-local VERSION = "0.9.0"
+local VERSION = "0.9.1"
 local TAG = "[BloodTrailTogether] "
 local UEHelpers = require("UEHelpers")
 
@@ -243,6 +243,12 @@ local function scanControllers()
             if valid(l) then controllers.left = l end
             if valid(r) then controllers.right = r end
         end)
+        -- VRExpansion base character (WendigoVrChar): LeftMotionController / RightMotionController.
+        -- These exist with or without a headset (desktop mode has no tracked controllers to scan).
+        pcall(function()
+            if not controllers.left and valid(pawn.LeftMotionController) then controllers.left = pawn.LeftMotionController end
+            if not controllers.right and valid(pawn.RightMotionController) then controllers.right = pawn.RightMotionController end
+        end)
         if controllers.left and controllers.right then return end
     end
     -- Other pawns: search motion controller components (rare, throttled by the caller).
@@ -302,7 +308,13 @@ local function componentsOf(actor, cls)
     local ok, comps = pcall(function() return actor:K2_GetComponentsByClass(cls) end)
     if not ok or not comps then return out end
     if type(comps) == "table" then
-        for _, c in ipairs(comps) do out[#out + 1] = c end
+        -- UE4SS hands out-parameter arrays back as a Lua table of wrapped values: unwrap each one
+        -- (0.9.1: without this every component of a held melee weapon failed the visibility check)
+        for _, c in ipairs(comps) do
+            local okU, u = pcall(function() return c:get() end)
+            if okU and u ~= nil then c = u end
+            if valid(c) then out[#out + 1] = c end
+        end
     else
         pcall(function() comps:ForEach(function(_, e) out[#out + 1] = e:get() end) end)
     end
@@ -322,7 +334,7 @@ end
 -- Every visible mesh of the held thing (receiver, slide, pump, magazine, scope, attached flashlight...)
 -- with its transform relative to the gripped component. Returns the part lines and a signature.
 local function heldParts(actor, main)
-    local parts, sig = {}, {}
+    local parts, sig, comps, rels = {}, {}, {}, {}
     local mt = main:K2_GetComponentToWorld()
     local mq = { mt.Rotation.X, mt.Rotation.Y, mt.Rotation.Z, mt.Rotation.W }
     local ms = (mt.Scale3D.X ~= 0) and mt.Scale3D.X or 1
@@ -339,6 +351,8 @@ local function heldParts(actor, main)
         local path = objPath(mesh)
         parts[#parts + 1] = string.format("%s %s %.2f %.2f %.2f %.4f %.4f %.4f %.4f %.3f", path, kind,
             rx / ms, ry / ms, rz / ms, rq[1], rq[2], rq[3], rq[4], t.Scale3D.X / ms)
+        comps[#parts] = c
+        rels[#parts] = { rx / ms, ry / ms, rz / ms, rq[1], rq[2], rq[3], rq[4] }
         sig[#sig + 1] = path
     end
     local function addActor(a)
@@ -355,12 +369,14 @@ local function heldParts(actor, main)
             if valid(aa) then addActor(aa) end
         end
     end)
-    return parts, table.concat(sig, ","), ms
+    return parts, table.concat(sig, ","), ms, comps, rels
 end
 
 local function resolveHeld(side, ctrl)
     local st = heldState[side]
     local obj = nil
+    -- Only GrippedObjects: LocallyGrippedObjects reported entries whose object read back invalid,
+    -- and reading it is a crash risk (0.9.1 test). Grips made in this game land in GrippedObjects.
     pcall(function()
         local arr = ctrl.GrippedObjects
         if arr:GetArrayNum() > 0 then obj = arr[1].GrippedObject end
@@ -371,7 +387,7 @@ local function resolveHeld(side, ctrl)
         if name ~= st.name then st.name, st.comp, st.actor, st.sig = name, nil, nil, nil end
         local parts, sig, ms = {}, "", 1
         if name then
-            pcall(function()
+            local okR, errR = pcall(function()
                 local actor, main = obj, nil
                 if obj:IsA(cls("/Script/Engine.Actor")) then
                     main = obj:K2_GetRootComponent()
@@ -381,19 +397,58 @@ local function resolveHeld(side, ctrl)
                 -- an NPC body being dragged is not drawn as a "held item" (the body itself is synced)
                 if actor:IsA(cls(NPC_CLASS_PATH)) then return end
                 -- a map object exists in the other game too: the real one is moved there (prop sync)
-                if EX.isLevel(actor) then st.comp, st.actor = main, actor return end
-                parts, sig, ms = heldParts(actor, main)
+                if EX.isLevel(actor) then
+                    -- a map object exists in the other game too: that real object is put in the other
+                    -- player's hand there (pose stream, 30 Hz, smoothed) instead of drawing a copy
+                    local _, _, pms, comps, rels = heldParts(actor, main)
+                    st.newComps, st.newRels = comps, rels
+                    st.comp, st.actor = main, actor
+                    sig, ms = "prop:" .. objPath(actor), pms
+                    return
+                end
+                parts, sig, ms, st.newComps, st.newRels = heldParts(actor, main)
                 st.comp, st.actor = main, actor
                 pcall(function() st.class = objPath(actor:GetClass()) end)
             end)
+            if not okR and st.errLogged ~= name then st.errLogged = name log("held item read failed (" .. name .. "): " .. tostring(errR)) end
+            if okR and sig == "" and selfTest ~= "" and st.emptyLogged ~= name then
+                st.emptyLogged = name
+                local n = 0
+                pcall(function() n = #componentsOf(obj, cls("/Script/Engine.PrimitiveComponent")) end)
+                log("held object without visible mesh parts: " .. name .. " (" .. n .. " primitive components, level object " .. tostring(EX.levelOf[objPath(obj)]) .. ")")
+                local okD, errD = pcall(function()
+                    for _, c in ipairs(componentsOf(obj, cls("/Script/Engine.PrimitiveComponent"))) do
+                        local v, h = "?", "?"
+                        pcall(function() v = tostring(c:IsVisible()) end)
+                        pcall(function() h = tostring(c.bHiddenInGame) end)
+                        log(string.format("  P %s (%s): visible %s, hiddenInGame %s", c:GetFName():ToString(), c:GetClass():GetFName():ToString(), v, h))
+                    end
+                    for _, kc in ipairs({ { "/Script/Engine.SkeletalMeshComponent", "K" }, { "/Script/Engine.StaticMeshComponent", "S" } }) do
+                        for _, c in ipairs(componentsOf(obj, cls(kc[1]))) do
+                            local v, h, m = "?", "?", "?"
+                            pcall(function() v = tostring(c:IsVisible()) end)
+                            pcall(function() h = tostring(c.bHiddenInGame) end)
+                            pcall(function() m = tostring(valid(kc[2] == "K" and c.SkeletalMesh or c.StaticMesh)) end)
+                            log(string.format("  %s %s: visible %s, hiddenInGame %s, mesh %s", kc[2], c:GetFName():ToString(), v, h, m))
+                        end
+                    end
+                end)
+                if not okD then log("  component listing failed: " .. tostring(errD)) end
+            end
         end
         if sig ~= st.sig then
             st.sig = sig
             -- the item's class first: the other game loads it, which loads its meshes (0.8.4: a gun
             -- whose model the other game had never loaded was invisible - "held item mesh not found")
             if sig ~= "" and st.class then heldEvents[#heldEvents + 1] = string.format("heldclass %s %s", side, st.class) end
-            heldEvents[#heldEvents + 1] = string.format("held %s %d %.3f", side, #parts, ms)
-            for i, p in ipairs(parts) do heldEvents[#heldEvents + 1] = string.format("heldpart %s %d %s", side, i, p) end
+            st.serial = (st.serial or 0) + 1
+            st.comps, st.base, st.moved = st.newComps, st.newRels, nil
+            if sig:sub(1, 5) == "prop:" then
+                heldEvents[#heldEvents + 1] = string.format("heldprop %s %s %d", side, sig:sub(6), st.serial)
+            else
+                heldEvents[#heldEvents + 1] = string.format("held %s %d %.3f %d", side, #parts, ms, st.serial)
+                for i, p in ipairs(parts) do heldEvents[#heldEvents + 1] = string.format("heldpart %s %d %s", side, i, p) end
+            end
             if sig ~= "" then log("holding in " .. side .. " hand: " .. sig) end
         end
     end
@@ -459,6 +514,37 @@ local function readLocalPose()
             end
         end)
     end
+    if selfTest ~= "" and frameNo % 300 == 0 then
+        pcall(function()
+            local function d(c)
+                if not valid(c) then return "none" end
+                local n1, n2 = -1, "-"
+                pcall(function() n1 = c.GrippedObjects:GetArrayNum() end)
+                local what = "-"
+                pcall(function()
+                    if n1 > 0 then
+                        local o = c.GrippedObjects[1].GrippedObject
+                        what = valid(o) and o:GetFullName() or "invalid"
+                    end
+                end)
+                return c:GetFName():ToString() .. " grips " .. n1 .. "/" .. n2 .. " first " .. what .. " | state " .. tostring(heldState[c == controllers.left and "L" or "R"].name)
+            end
+            log("controllers: left " .. d(controllers.left) .. ", right " .. d(controllers.right))
+            local pw = getPawn()
+            if pw then
+                for _, n in ipairs({ "LeftMotionController", "RightMotionController", "Left Grip Motion Controller", "Right Grip Motion Controller" }) do
+                    pcall(function()
+                        local c = pw[n]
+                        if valid(c) then
+                            local l = c:K2_GetComponentLocation()
+                            log(string.format("  pawn.%s = %s at (%.0f, %.0f, %.0f) grips %d tracked %s", n, c:GetFName():ToString(), l.X, l.Y, l.Z,
+                                c.GrippedObjects:GetArrayNum(), tostring(c:IsTracked())))
+                        end
+                    end)
+                end
+            end
+        end)
+    end
     -- held items
     local HL, HR = { 0, 0, 0, 0, 0, 0, 1 }, { 0, 0, 0, 0, 0, 0, 1 }
     if valid(controllers.left) then
@@ -467,6 +553,8 @@ local function readLocalPose()
     end
     if valid(controllers.right) then
         local ok, t = pcall(resolveHeld, "R", controllers.right)
+        if EX.heldMotion and frameNo % 2 == 0 then   -- the DLL drops state lines while not connected
+            pcall(EX.heldMotion, "L") pcall(EX.heldMotion, "R") end
         if ok and t then HR = t flags = flags | 8 end
     end
     local yaw = select(2, quatToRot(qx, qy, qz, qw))
@@ -1209,7 +1297,11 @@ local function dropShown(h)
     for _, a in ipairs(h.actors) do if valid(a) then pcall(function() a:K2_DestroyActor() end) end end
 end
 local function destroyHeld()
-    for side, h in pairs(heldShown) do dropShown(h) heldShown[side] = nil end
+    for side, h in pairs(heldShown) do
+        if h and h.propActor and EX.releaseHeldProp then pcall(EX.releaseHeldProp, h) end
+        dropShown(h)
+        heldShown[side] = nil
+    end
 end
 
 local function meshPartActor(part)
@@ -1229,8 +1321,83 @@ local function meshPartActor(part)
     return a
 end
 
+-- The other player holds one of the map's own objects: put that object (it exists here too) into
+-- their hand from the interpolated pose stream, physics paused, and move its moving parts (slide,
+-- bolt, magazine) like theirs. On release it gets its physics back; the prop stream takes over.
+EX.remoteHeldProp = {}
+local function releaseHeldProp(h)
+    if not h or not h.propActor then return end
+    EX.remoteHeldProp[h.propPath] = nil
+    if valid(h.propActor) then
+        pcall(function() h.propActor:K2_GetRootComponent():SetSimulatePhysics(h.propSim == true) end)
+        pcall(function() h.propActor:SetActorEnableCollision(true) end)
+        for i, c in pairs(h.propComps or {}) do
+            local b = h.propBase and h.propBase[i]
+            if b and valid(c) then pcall(function() c:K2_SetRelativeLocationAndRotation(b.loc, b.rot, false, {}, true) end) end
+        end
+    end
+end
+EX.releaseHeldProp = releaseHeldProp
+local function updateHeldProp(side, on, x, y, z, qx, qy, qz, qw)
+    local want = remoteHeld[side]
+    local h = heldShown[side]
+    if h and (h.ver ~= want.ver or not on) then releaseHeldProp(h) heldShown[side] = nil h = nil end
+    if not on then return end
+    if not h then
+        local a = EX.propCache[want.prop]
+        if not valid(a) then a = StaticFindObject(want.prop) end
+        if not valid(a) or not EX.isLevel(a) then
+            if want.missingLogged ~= want.prop then want.missingLogged = want.prop log("held map object not found here: " .. want.prop) end
+            return
+        end
+        EX.propCache[want.prop] = a
+        local root = a:K2_GetRootComponent()
+        h = { ver = want.ver, actors = {}, propActor = a, propPath = want.prop }
+        pcall(function() h.propSim = root:IsSimulatingPhysics(FName("None")) end)
+        pcall(function() root:SetSimulatePhysics(false) end)
+        pcall(function() a:SetActorEnableCollision(false) end)      -- the local player cannot grab it out of their hand
+        local okP, _, _, _, comps = pcall(heldParts, a, root)
+        h.propComps = okP and comps or {}
+        h.propBase = {}
+        for i, c in pairs(h.propComps) do
+            pcall(function()
+                local l, r = c.RelativeLocation, c.RelativeRotation
+                h.propBase[i] = { loc = { X = l.X, Y = l.Y, Z = l.Z }, rot = { Pitch = r.Pitch, Yaw = r.Yaw, Roll = r.Roll } }
+            end)
+        end
+        heldShown[side] = h
+        EX.remoteHeldProp[want.prop] = true
+        log("other player holds in " .. side .. " hand: map object " .. (want.prop:match("([^%.:]+)$") or want.prop) .. " (" .. #h.propComps .. " parts)")
+    end
+    local a = h.propActor
+    if not valid(a) then return end
+    local p, yw, r = quatToRot(qx, qy, qz, qw)
+    a:K2_SetActorLocationAndRotation({ X = x, Y = y, Z = z }, { Pitch = p, Yaw = yw, Roll = r }, false, {}, true)
+    -- moving parts: world transform = held transform * offset sent by the holder
+    local mq = { qx, qy, qz, qw }
+    for i, c in pairs(h.propComps) do
+        local part = want.parts[i]
+        if valid(c) then
+            if part and part.mx then
+                local ox, oy, oz = qv(mq, part.mx, part.my, part.mz)
+                local q = qmul(mq, part.mq)
+                local pp, py, pr = quatToRot(q[1], q[2], q[3], q[4])
+                pcall(function() c:K2_SetWorldLocationAndRotation({ X = x + ox, Y = y + oy, Z = z + oz }, { Pitch = pp, Yaw = py, Roll = pr }, false, {}, true) end)
+                h.partMoved = h.partMoved or {}
+                h.partMoved[i] = true
+            elseif h.partMoved and h.partMoved[i] then
+                h.partMoved[i] = nil
+                local b = h.propBase[i]
+                if b then pcall(function() c:K2_SetRelativeLocationAndRotation(b.loc, b.rot, false, {}, true) end) end
+            end
+        end
+    end
+end
+
 local function updateHeldItem(side, on, x, y, z, qx, qy, qz, qw)
     local want = remoteHeld[side]
+    if want.prop then return updateHeldProp(side, on, x, y, z, qx, qy, qz, qw) end
+    if heldShown[side] and heldShown[side].propActor then releaseHeldProp(heldShown[side]) heldShown[side] = nil end
     local h = heldShown[side]
     if h and (h.ver ~= want.ver or not valid(h.actors[1])) then dropShown(h) h, heldShown[side] = nil, nil end
     local complete = want.n > 0
@@ -1293,8 +1460,10 @@ local function updateHeldItem(side, on, x, y, z, qx, qy, qz, qw)
     local mq, ms = { qx, qy, qz, qw }, want.ms or 1
     for i, a in ipairs(h.actors) do
         local part = h.parts[i]
-        local ox, oy, oz = qv(mq, part.x * ms, part.y * ms, part.z * ms)
-        local q = qmul(mq, part.q)
+        local px, py, pz, pq = part.x, part.y, part.z, part.q
+        if part.mx then px, py, pz, pq = part.mx, part.my, part.mz, part.mq end
+        local ox, oy, oz = qv(mq, px * ms, py * ms, pz * ms)
+        local q = qmul(mq, pq)
         local p, yw, r = quatToRot(q[1], q[2], q[3], q[4])
         a:K2_SetActorLocationAndRotation({ X = x + ox, Y = y + oy, Z = z + oz }, { Pitch = p, Yaw = yw, Roll = r }, false, {}, true)
         if part.appliedScale ~= part.s * ms then
@@ -1617,6 +1786,14 @@ local function updatePuppet(v)
     local okHR, eHR = pcall(updateHeldItem, "R", (flags & 8) ~= 0, v[36], v[37], v[38], v[39], v[40], v[41], v[42])
     if (not okHL or not okHR) and frameNo % 300 == 0 then log("held item display error: " .. tostring(eHL) .. " / " .. tostring(eHR)) end
     if selfTest ~= "" and frameNo % 450 == 0 then
+        pcall(function()
+            local h = heldShown.R
+            if h and h.actors[2] and valid(h.actors[1]) and valid(h.actors[2]) then
+                local a1, a2 = h.actors[1]:K2_GetActorLocation(), h.actors[2]:K2_GetActorLocation()
+                log(string.format("held motion: %d updates, part 2 is %.1f cm from part 1 (rest 10.0, slide back 11.7)", remoteHeld.R.moves or 0,
+                    math.sqrt(dist2(a1.X, a1.Y, a1.Z, a2.X, a2.Y, a2.Z))))
+            end
+        end)
         log(string.format("held debug: flags %d, remote R parts %d/%d, class %s, failedVer %s/%s, shown %s, okR %s %s", flags, #remoteHeld.R.parts, remoteHeld.R.n,
             tostring(remoteHeld.R.class), tostring(remoteHeld.R.failedVer), tostring(remoteHeld.R.ver), tostring(heldShown.R ~= nil), tostring(okHR), tostring(eHR)))
     end
@@ -1746,6 +1923,37 @@ local function liveNpcs()
 end
 
 local lastBodySent = {}   -- host: id -> {x,y,z} of the last corpse position sent
+
+-- Moving parts of a held item (slide/bolt going back when firing or racking, magazine sliding in,
+-- hammer...) as offsets from the item's main component. Only parts away from their resting offset
+-- are listed; an empty list means "all back at rest". State channel: the newest line wins.
+function EX.heldMotion(side)
+    local st = heldState[side]
+    if not (st.comps and st.base and valid(st.comp)) then return end
+    local mt = st.comp:K2_GetComponentToWorld()
+    local mq = { mt.Rotation.X, mt.Rotation.Y, mt.Rotation.Z, mt.Rotation.W }
+    local ms = (mt.Scale3D.X ~= 0) and mt.Scale3D.X or 1
+    local iq = qconj(mq)
+    local out = {}
+    for i, c in pairs(st.comps) do
+        local b = st.base[i]
+        if b and valid(c) then
+            local t = c:K2_GetComponentToWorld()
+            local rx, ry, rz = qv(iq, t.Translation.X - mt.Translation.X, t.Translation.Y - mt.Translation.Y, t.Translation.Z - mt.Translation.Z)
+            local rq = qmul(iq, { t.Rotation.X, t.Rotation.Y, t.Rotation.Z, t.Rotation.W })
+            rx, ry, rz = rx / ms, ry / ms, rz / ms
+            local dot = math.abs(rq[1] * b[4] + rq[2] * b[5] + rq[3] * b[6] + rq[4] * b[7])
+            if dist2(rx, ry, rz, b[1], b[2], b[3]) > 0.09 or dot < 0.9998 then
+                out[#out + 1] = string.format("%d %.2f %.2f %.2f %.4f %.4f %.4f %.4f", i, rx, ry, rz, rq[1], rq[2], rq[3], rq[4])
+            end
+        end
+    end
+    local line = table.concat(out, " ")
+    if line ~= st.moved then
+        st.moved = line
+        sendState("hm" .. side, string.format("heldmove %s %d%s%s", side, st.serial or 0, line ~= "" and " " or "", line))
+    end
+end
 
 -- Ragdoll pose = a few physics bodies in world space. The other game pulls the same bodies of its
 -- copy towards them with velocities, so the copy keeps real physics (collisions, floppy joints)
@@ -2249,6 +2457,8 @@ function EX.propTick()
 end
 
 function EX.sendProp(path, a)
+    EX.propSent = EX.propSent or {}
+    EX.propSent[path] = true
     pcall(function()
         local l = a:K2_GetActorLocation()
         local r = a:K2_GetActorRotation()
@@ -2261,6 +2471,7 @@ end
 
 function EX.onProp(path, x, y, z, qx, qy, qz, qw, vx, vy, vz)
     if EX.props[path] then return end                 -- I'm holding / throwing it myself
+    if EX.remoteHeldProp and EX.remoteHeldProp[path] then return end   -- in the other player's hand (pose-driven)
     local a = EX.propCache[path]
     if not valid(a) then
         a = StaticFindObject(path)
@@ -2278,8 +2489,33 @@ function EX.onProp(path, x, y, z, qx, qy, qz, qw, vx, vy, vz)
     end)
 end
 
+-- A player (re)connected: everything that is only sent when it changes is sent again, so a late
+-- joiner sees what is already going on - the item in your hands, its moving parts, every corpse
+-- (death + pose), map objects that were moved, your health and look.
+function EX.onPeerJoined()
+    log("player joined (" .. tostring(status.peer) .. "): sending the current state")
+    for _, side in ipairs({ "L", "R" }) do
+        local st = heldState[side]
+        st.sig, st.moved = nil, nil
+        st.name = nil                 -- re-read the held item on the next frame
+    end
+    lastBodySent = {}
+    EX.hpSent, EX.lookSentAt = nil, nil
+    for path, _ in pairs(EX.propSent or {}) do
+        local a = EX.propCache[path]
+        if not valid(a) then a = StaticFindObject(path) end
+        if valid(a) then EX.sendProp(path, a) end
+    end
+end
+
 function EX.tick()
-    if status.state ~= "Connected" then EX.lookSentAt = nil return end
+    if status.state ~= "Connected" then EX.lookSentAt = nil EX.joinKey = nil return end
+    local key = tostring(status.peer) .. "|" .. tostring(status.role)
+    if key ~= EX.joinKey then
+        EX.joinKey = key
+        local okJ, errJ = pcall(EX.onPeerJoined)
+        if not okJ then log("join resend failed: " .. tostring(errJ)) end
+    end
     if not EX.lookSentAt or frameNo - EX.lookSentAt > 1800 then
         EX.lookSentAt = frameNo
         sendGame("look " .. EX.lookStr)
@@ -3590,10 +3826,32 @@ local function handleGame(line)
         puppetRespawn()
     elseif kind == "held" then
         -- held <L|R> <part count> <scale of the gripped component>
-        local side, n, ms = rest:match("^([LR]) (%d+) (%S+)")
+        local side, n, ms, serial = rest:match("^([LR]) (%d+) (%S+) ?(%d*)")
         if side then
             local old = remoteHeld[side]
-            remoteHeld[side] = { ver = old.ver + 1, n = tonumber(n), ms = tonumber(ms) or 1, parts = {}, class = EX.pendingClass[side] }
+            remoteHeld[side] = { ver = old.ver + 1, n = tonumber(n), ms = tonumber(ms) or 1, parts = {}, class = EX.pendingClass[side], serial = tonumber(serial) }
+        end
+    elseif kind == "heldprop" then
+        -- heldprop <L|R> <map object path> <serial>: the other player holds this map object
+        local side, path, serial = rest:match("^([LR]) (%S+) (%d+)")
+        if side then
+            local old = remoteHeld[side]
+            remoteHeld[side] = { ver = old.ver + 1, n = 0, ms = 1, parts = {}, prop = path, serial = tonumber(serial) }
+        end
+    elseif kind == "heldmove" then
+        -- heldmove <L|R> <serial> [<part> x y z qx qy qz qw]...: parts away from their resting offset
+        local side, serial, list = rest:match("^([LR]) (%d+) ?(.*)$")
+        local want = side and remoteHeld[side]
+        if want and want.serial == tonumber(serial) then
+            for _, part in pairs(want.parts) do part.mx = nil end
+            local v = {}
+            for x in (list or ""):gmatch("%S+") do v[#v + 1] = tonumber(x) end
+            for k = 1, #v - 7, 8 do
+                local part = want.parts[v[k]]
+                if not part and want.prop then part = {} want.parts[v[k]] = part end
+                if part then part.mx, part.my, part.mz, part.mq = v[k + 1], v[k + 2], v[k + 3], { v[k + 4], v[k + 5], v[k + 6], v[k + 7] } end
+            end
+            want.moves = (want.moves or 0) + 1
         end
     elseif kind == "heldclass" then
         -- heldclass <L|R> <class path>: load that item's blueprint so its meshes exist here
@@ -3859,6 +4117,63 @@ local function frame()
         end
     end
     -- developer self-test: shoot the first mirrored NPC (client side of NPC sync)
+    -- developer self-test: grip a real Glock in the right hand with the game's grip system and fire it
+    -- every ~3 s (OnUsed / OnEndUsed, the gun's own trigger path), to test weapon sync without a headset
+    if selfTest:find("gunfire", 1, true) then
+        -- a gun already in the right hand (e.g. the desktop mod's key 1) is used as it is
+        if not valid(EX.testGun) and frameNo % 30 == 0 then
+            pcall(function()
+                local R = controllers.right
+                if valid(R) and R.GrippedObjects:GetArrayNum() > 0 then
+                    local o = R.GrippedObjects[1].GrippedObject
+                    if valid(o) and o:IsA(cls("/Script/Engine.Actor")) and o:GetFullName():lower():find("skel") then
+                        EX.testGun = o
+                        log("self-test: using the gun in the right hand: " .. o:GetFullName())
+                    end
+                end
+            end)
+        end
+        if not valid(EX.testGun) and frameNo >= 900 and frameNo % 300 == 0 and selfTest:find("gunspawn", 1, true) then
+            local okG, errG = pcall(function()
+                local path = "/Game/VRExpansion/Guns/skeletalguns/bp_skel_glock.bp_skel_glock_C"
+                for _, what in ipairs({ path, "/Game/VRExpansion/Guns/skeletalguns/bp_skel_glock.bp_skel_glock", "/Game/VRExpansion/Guns/skeletalguns/bp_skel_glock" }) do
+                    if valid(StaticFindObject(path)) then break end
+                    pcall(LoadAsset, what)
+                end
+                local g = spawnActor(path)
+                if not g then error("could not spawn the glock") end
+                pcall(function() g:SetActorEnableCollision(true) end)
+                local R = controllers.right
+                if not valid(R) then pcall(function() R = getPawn().RightMotionController end) end
+                if not valid(R) then g:K2_DestroyActor() error("no right controller") end
+                local l = R:K2_GetComponentLocation()
+                g:K2_SetActorLocation({ X = l.X, Y = l.Y, Z = l.Z }, false, {}, true)
+                pcall(function()
+                    local s = g.VRGripInterfaceSettings
+                    s.SlotDefaultGripType, s.FreeDefaultGripType, s.ConstraintBreakDistance, s.LateUpdateSetting = 8, 8, 0, 4
+                end)
+                R:GripObjectByInterface(g, g:GetTransform(), false, FName("None"), FName("None"), false)
+                if R.GrippedObjects:GetArrayNum() == 0 then
+                    -- plain rigid attachment grip (same fallback the desktop mod uses)
+                    R:GripObject(g, g:GetTransform(), false, FName("None"), FName("None"), 7, 4, 1, 1500, 200, false)
+                end
+                EX.testGun = g
+                log("self-test: gripped a glock, grips now " .. R.GrippedObjects:GetArrayNum())
+            end)
+            if not okG then log("self-test gunfire failed: " .. tostring(errG)) end
+        elseif valid(EX.testGun) and frameNo > 900 then
+            local g = EX.testGun
+            if frameNo % 270 == 0 then
+                pcall(function() g.Ammo = 17 g.RoundChambered = true g.CanBeFired = true end)
+                local okF, errF = pcall(function() g:OnUsed() end)
+                local slide = "?"
+                pcall(function() local r = g.SlideGroup.RelativeLocation slide = string.format("%.1f %.1f %.1f", r.X, r.Y, r.Z) end)
+                log("self-test: pulled the trigger (" .. tostring(okF and "ok" or errF) .. "), slide at " .. slide)
+            elseif frameNo % 270 == 6 then
+                pcall(function() g:OnEndUsed() end)
+            end
+        end
+    end
     -- developer self-test (host): headshot one live AI NPC every ~10 s so it dies and ragdolls
     if selfTest:find("npckill", 1, true) and status.role == "host" and frameNo % 900 == 0 then
         for _, m in pairs(npcActor) do

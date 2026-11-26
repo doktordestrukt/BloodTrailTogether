@@ -90,6 +90,7 @@ int main(int argc, char** argv) {
   std::string hold_class;  // --hold-class <blueprint class path>: sent first, like the game does
   std::string hold_mesh;  // --hold <skeletal mesh path>: "hold" it in the right hand like a gun
   bool hold_sent = false;
+  bool slide_test = false;  // --slide: two-part held item whose second part moves like a pistol slide
   double last_npc = 0, connected_at = -1;
   ImpairmentParams imp;
   double seconds = 0;
@@ -108,6 +109,7 @@ int main(int argc, char** argv) {
     else if (a == "--sound") sound_path = next();
     else if (a == "--game") game_line = next();
     else if (a == "--fake-npc") fake_npc = true;
+    else if (a == "--slide") slide_test = true;
     else if (a == "--npc-pose") npc_pose_arg = next();
     else if (a == "--hold") hold_mesh = next();
     else if (a == "--hold-class") hold_class = next();
@@ -176,11 +178,21 @@ int main(int argc, char** argv) {
           NetEvent e;
           e.type = EventType::Game;
           if (!hold_class.empty()) { e.s1 = "heldclass R " + hold_class; ses.send_event(e); }
-          e.s1 = "held R 1 1.000";
+          std::string kind = hold_mesh.find("/SM_") != std::string::npos ? " S" : " K";
+          e.s1 = std::string("held R ") + (slide_test ? "2" : "1") + " 1.000 7";
           ses.send_event(e);
-          e.s1 = "heldpart R 1 " + hold_mesh + (hold_mesh.find("/SM_") != std::string::npos ? " S" : " K") + " 0 0 0 0 0 0 1 1.000";
+          e.s1 = "heldpart R 1 " + hold_mesh + kind + " 0 0 0 0 0 0 1 1.000";
           ses.send_event(e);
+          if (slide_test) {  // a second part 10 cm above the first: the "slide"
+            e.s1 = "heldpart R 2 " + hold_mesh + kind + " 0 0 10 0 0 0 1 1.000";
+            ses.send_event(e);
+          }
           hold_sent = true;
+        }
+        if (slide_test && hold_sent) {
+          // the slide goes 6 cm back for 0.5 s every 2 s, like a shot; at rest the list is empty
+          bool back = std::fmod(now - start, 2.0) < 0.5;
+          ses.send_state("hmR", back ? "heldmove R 7 2 -6.00 0.00 10.00 0.0000 0.0000 0.0000 1.0000" : "heldmove R 7");
         }
       }
       ses.set_local_pose(pf);

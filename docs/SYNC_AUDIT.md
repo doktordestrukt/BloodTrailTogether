@@ -51,6 +51,10 @@ game's paks would make installs fragile and break with every game update.
 - Corpse pose, replaying a real ragdoll pose recorded from the host game: all 11 bones within 6-27 cm. Limbs already resting on the floor resist the pull, so the pose is close but not exact.
 - Host side: real AI NPC killed by a headshot -> corpse pose streamed (about 70 updates/s while moving, none at rest).
 
+- Weapon moving parts, receiving side: a two-part held item whose second part moves like a slide shows at exactly the rest (10.0 cm) and back (11.7 cm) offsets as updates arrive.
+- Desktop player sending: knife and bat equipped with the desktop mod are detected and sent (class, item and parts); gunshots and shell-casing sounds arrive with positions.
+- Late join: held state, corpses and moved props are re-sent when a player connects.
+
 ### Implemented, still to verify in game
 - Dragged bodies and thrown props over the state channel: the code path is unchanged apart from the channel. A VR grab is needed to test it.
 - The other player's body was once destroyed by the game while an NPC copy got up (seen 1 of 4 runs). It respawned the next frame; cause unknown.
