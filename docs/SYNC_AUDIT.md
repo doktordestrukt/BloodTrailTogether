@@ -48,14 +48,20 @@ game's paks would make installs fragile and break with every game update.
 - State channel (unit test): 60 keys at 30 Hz, final values delivered, no out-of-order values, up to 25 % loss.
 
 - NPC sync over the state channel, joining side, scripted host NPC: walking copy 0-4 cm from the host position; crouch applied both ways; knocked-down copy ragdolls (pelvis 9-11 cm) and gets up again; death -> ragdoll.
-- Corpse pose, replaying a real ragdoll pose recorded from the host game: all 11 bones within 6-27 cm. Limbs already resting on the floor resist the pull, so the pose is close but not exact.
+- Corpse pose with a scripted (not real) pose: all 11 bones within 6-27 cm. (Correction: the 'recorded real pose' run actually used the scripted pose - the test tool split the argument.)
+- **Two real game clients on one PC** (copy 1 hosts, copy 2 joins, real session code): both see each other's body with arms 2 cm from target; a real NPC corpse followed with every one of 11 bones within 2-5 cm.
 - Host side: real AI NPC killed by a headshot -> corpse pose streamed (about 70 updates/s while moving, none at rest).
 
 - Weapon moving parts, receiving side: a two-part held item whose second part moves like a slide shows at exactly the rest (10.0 cm) and back (11.7 cm) offsets as updates arrive.
 - Desktop player sending: knife and bat equipped with the desktop mod are detected and sent (class, item and parts); gunshots and shell-casing sounds arrive with positions.
 - Late join: held state, corpses and moved props are re-sent when a player connects.
 
+- World blood: the host detected 4 blood decals from headshots and sent them (class, transform, random roll and scale).
+- Dropped item: the other player's dropped Glock appears, falls to the floor (z 5 cm) and is removed when picked up.
+- Held item on the hand: 0 cm off its grip while the hand misses an out-of-reach controller by up to 23 cm.
+
 ### Implemented, still to verify in game
+- Blood on the joining side (spawning the host's decal and removing its own): the receive test did not run because of the tool bug above.
 - Dragged bodies and thrown props over the state channel: the code path is unchanged apart from the channel. A VR grab is needed to test it.
 - The other player's body was once destroyed by the game while an NPC copy got up (seen 1 of 4 runs). It respawned the next frame; cause unknown.
 

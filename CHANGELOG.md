@@ -4,6 +4,23 @@ Versioning: [Semantic Versioning](https://semver.org). The version lives in `CMa
 `release.json` and `Scripts/main.lua` (the release script refuses to build if they differ).
 The network protocol version (`kProtocolVersion`) changes only when old and new clients can no longer talk.
 
+## [0.9.2] - 2026-11-26
+### Added
+- World blood is host-authoritative: the host's game sends every new blood decal (class, transform,
+  size); the joining game replaces its own random blood with the host's exact decals.
+- Dropped / thrown items that exist only in one game (spawned guns, magazines, knives) are shown to
+  the other player where they fall and land, and removed when picked up again.
+- Hand pose of the other player follows what they hold (ALS overlay: relaxed, pistol grip, rifle grip).
+- Two copies of the game on one PC (testing): `steam_appid.txt` next to the game exe lets a second copy
+  start; each copy gets its own pipe set and log (`BloodTrailTogether_2.log`); Lua log lines are also
+  written to the DLL log. Developer option `Dev.AutoStart=udp_auto` (copy 1 hosts, copy 2 joins).
+- BloodTrail Together window: minimise and maximise (full screen) buttons, freely resizable; the panel
+  scales with the window.
+### Fixed
+- A held item could float beside the other player's hand when they reached further than the body's arm
+  length: items now follow the hand by the amount the hand fell short.
+- Developer test tool: multi-word arguments were split by PowerShell `Start-Process`.
+
 ## [0.9.1] - 2026-11-26
 ### Added
 - Desktop (keyboard + mouse, BTDesktop mod) and VR players can play together on the same servers:

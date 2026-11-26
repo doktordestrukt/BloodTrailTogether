@@ -24,6 +24,14 @@ void log_init(const std::wstring& path, bool console, LogLevel min_level) {
   g_file = nullptr;
   // Shared read access so the log can be viewed (or copied for a bug report) while the game runs.
   if (!path.empty()) g_file = _wfsopen(path.c_str(), L"w", _SH_DENYWR);
+  // A second copy of the game is running (testing two players on one PC): the first copy holds the
+  // log open, so this copy logs to <name>_2.log, _3.log ...
+  for (int n = 2; !g_file && !path.empty() && n <= 8; ++n) {
+    std::wstring alt = path;
+    size_t dot = alt.rfind(L'.');
+    alt.insert(dot == std::wstring::npos ? alt.size() : dot, L"_" + std::to_wstring(n));
+    g_file = _wfsopen(alt.c_str(), L"w", _SH_DENYWR);
+  }
   g_console = console;
   g_min = min_level;
 }

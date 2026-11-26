@@ -57,6 +57,11 @@ static DWORD WINAPI init_thread(LPVOID) {
         else if (auto_start == "sim_orbit") a.engine->start_simulated_peer(SimMode::Orbit);
         else if (auto_start == "udp_host") a.engine->host_dev_udp(27777);
         else if (auto_start == "udp_join") a.engine->join_dev_udp("127.0.0.1", 27777);
+        // two copies of the game on one PC: the first copy (pipe set 1) hosts, the second joins it
+        else if (auto_start == "udp_auto") {
+          if (a.pipe_index <= 1) a.engine->host_dev_udp(27777);
+          else a.engine->join_dev_udp("127.0.0.1", 27777);
+        }
       }
       // Periodic diagnostics so a session can be judged from the log alone.
       for (;;) {

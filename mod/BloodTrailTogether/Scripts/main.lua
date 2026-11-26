@@ -7,7 +7,7 @@
 -- Everything that touches the game is wrapped in pcall: a failure disables that feature and is
 -- logged to UE4SS.log / BloodTrailTogether.log instead of crashing the game.
 
-local VERSION = "0.9.1"
+local VERSION = "0.9.2"
 local TAG = "[BloodTrailTogether] "
 local UEHelpers = require("UEHelpers")
 
@@ -16,7 +16,14 @@ local FRAME_MS = 11            -- ~90 Hz request rate
 local MAP_POLL_FRAMES = 30     -- read the world name about 3x per second
 local CONTROLLER_RESCAN_FRAMES = 120
 
-local function log(msg) print(TAG .. tostring(msg) .. "\n") end
+-- Log lines also go to the DLL's own log (BloodTrailTogether.log, or _2.log for a second copy of
+-- the game on the same PC, whose UE4SS cannot write the shared UE4SS.log).
+local logQueue = {}
+local function log(msg)
+    msg = tostring(msg)
+    print(TAG .. msg .. "\n")
+    if #logQueue < 64 then logQueue[#logQueue + 1] = "D " .. (msg:gsub("[\r\n]", " ")) end
+end
 
 ------------------------------------------------------------------------------- paths / DLL
 local script = debug.getinfo(1, "S").source:gsub("^@", "")
@@ -384,7 +391,15 @@ local function resolveHeld(side, ctrl)
     local name = valid(obj) and obj:GetFullName() or nil
     -- re-read the parts twice a second while held: a magazine coming out / going in shows up
     if name ~= st.name or (name and frameNo % 45 == 0) then
-        if name ~= st.name then st.name, st.comp, st.actor, st.sig = name, nil, nil, nil end
+        if name ~= st.name then
+            -- the previous item left the hand: if it is not a map object, keep showing it to the other
+            -- player where it falls / lands (dropped or thrown guns, magazines, knives)
+            if valid(st.actor) and st.class and st.sig and st.sig ~= "" and st.sig:sub(1, 5) ~= "prop:" and EX.trackDropped then
+                pcall(EX.trackDropped, st.actor, st.class)
+            end
+            if name and EX.untrackDropped then pcall(EX.untrackDropped, name) end   -- picked up again
+            st.name, st.comp, st.actor, st.sig = name, nil, nil, nil
+        end
         local parts, sig, ms = {}, "", 1
         if name then
             local okR, errR = pcall(function()
@@ -1394,6 +1409,53 @@ local function updateHeldProp(side, on, x, y, z, qx, qy, qz, qw)
     end
 end
 
+-- inert copy of a blueprint (no collision, no physics, no tick): for showing the other player's items
+function EX.inertCopy(class)
+    if not valid(StaticFindObject(class)) then
+        local pkg = class:match("^(.-)%.") or class
+        for _, what in ipairs({ class, pkg .. "." .. (pkg:match("([^/]+)$") or ""), pkg }) do
+            if valid(StaticFindObject(class)) then break end
+            pcall(LoadAsset, what)
+        end
+    end
+    local a = spawnActor(class)
+    if not a then return nil end
+    pcall(function() a:SetActorTickEnabled(false) end)
+    pcall(function()
+        for _, c in ipairs(componentsOf(a, cls("/Script/Engine.PrimitiveComponent"))) do
+            pcall(function() c:SetSimulatePhysics(false) end)
+            pcall(function() c:SetCollisionEnabled(0) end)
+        end
+    end)
+    return a
+end
+
+function EX.remoteDroppedTick()
+    for id, r in pairs(EX.remoteDropped or {}) do
+        if not valid(r.actor) then
+            if not r.failedAt or frameNo - r.failedAt > 300 then
+                local ok, a = pcall(EX.inertCopy, r.class)
+                if ok and a then
+                    r.actor = a
+                    r.x, r.y, r.z = r.tx, r.ty, r.tz
+                    log("showing an item the other player dropped: " .. (r.class:match("([^/%.]+)$") or r.class))
+                else
+                    r.failedAt = frameNo
+                end
+            end
+        end
+        if valid(r.actor) and r.tx then
+            -- smooth towards the newest position (state updates come ~30 times a second)
+            local k = 0.35
+            r.x = r.x + (r.tx - r.x) * k
+            r.y = r.y + (r.ty - r.y) * k
+            r.z = r.z + (r.tz - r.z) * k
+            local p, yw, rl = quatToRot(r.tq[1], r.tq[2], r.tq[3], r.tq[4])
+            pcall(function() r.actor:K2_SetActorLocationAndRotation({ X = r.x, Y = r.y, Z = r.z }, { Pitch = p, Yaw = yw, Roll = rl }, false, {}, true) end)
+        end
+    end
+end
+
 local function updateHeldItem(side, on, x, y, z, qx, qy, qz, qw)
     local want = remoteHeld[side]
     if want.prop then return updateHeldProp(side, on, x, y, z, qx, qy, qz, qw) end
@@ -1430,21 +1492,12 @@ local function updateHeldItem(side, on, x, y, z, qx, qy, qz, qw)
             -- the meshes are not in memory here: show a copy of the item itself (its blueprint),
             -- made inert - no collision (cannot be grabbed), no physics, no tick
             -- a map change unloads a class nothing else uses: load it again if needed
-            if not valid(StaticFindObject(want.class)) then pcall(LoadAsset, want.class) end
-            local okA, a = pcall(spawnActor, want.class)
+            local okA, a = pcall(EX.inertCopy, want.class)
             if not (okA and a) and want.copyLogged ~= want.ver then
                 want.copyLogged = want.ver
                 log("could not show a copy of " .. want.class .. ": " .. tostring(a) .. " (class loaded: " .. tostring(valid(StaticFindObject(want.class))) .. ")")
             end
             if okA and a then
-                pcall(function() a:SetActorTickEnabled(false) end)
-                pcall(function() a:K2_GetRootComponent():SetSimulatePhysics(false) end)
-                pcall(function()
-                    for _, c in ipairs(componentsOf(a, cls("/Script/Engine.PrimitiveComponent"))) do
-                        pcall(function() c:SetSimulatePhysics(false) end)
-                        pcall(function() c:SetCollisionEnabled(0) end)
-                    end
-                end)
                 h.actors[1], h.parts[1] = a, { x = 0, y = 0, z = 0, q = { 0, 0, 0, 1 }, s = 1 }
                 names[1] = want.class:match("([^/%.]+)$") .. " (blueprint copy)"
             end
@@ -1505,6 +1558,20 @@ function EX.animArmIK(P, v, flags)
             end
         end
         log("anim-graph arm IK nodes: " .. table.concat(found, ", "))
+        if selfTest:find("probebones", 1, true) then
+            local mods = {}
+            for i = 0, 80 do
+                local nm = i == 0 and "AnimGraphNode_ModifyBone" or ("AnimGraphNode_ModifyBone_" .. i)
+                local okN, n = pcall(function() return P.anim[nm] end)
+                if okN and n then
+                    local b, rm = "?", "?"
+                    pcall(function() b = n.BoneToModify.BoneName:ToString() end)
+                    pcall(function() rm = tostring(n.RotationMode) .. "/" .. tostring(n.RotationSpace) end)
+                    mods[#mods + 1] = i .. "=" .. b .. "(" .. rm .. ")"
+                end
+            end
+            log("anim-graph ModifyBone nodes: " .. table.concat(mods, ", "))
+        end
     end
     local by = P.bodyYaw * DEG
     local Fx, Fy = math.cos(by), math.sin(by)
@@ -1781,9 +1848,39 @@ local function updatePuppet(v)
         end
     end
 
+    -- Hand pose from the game's own ALS overlay poses (there are no finger nodes in the NPC anim
+    -- graph): relaxed hands (Masculine, 1) when empty, one-handed pistol grip (6) with an item in one
+    -- hand, rifle grip (5) with items in both hands. The arm IK still puts the hands on the controllers.
+    do
+        local hl, hr = (flags & 4) ~= 0, (flags & 8) ~= 0
+        local want = (hl and hr) and 5 or ((hl or hr) and 6 or 1)
+        if want ~= P.overlay then
+            P.overlay = want
+            pcall(function() puppet:BPI_Set_OverlayState(want) end)
+            pcall(function() P.anim.OverlayState = want end)
+        end
+    end
     -- held items (gun / magazine / melee) exactly where they are in the other player's hands
-    local okHL, eHL = pcall(updateHeldItem, "L", (flags & 4) ~= 0, v[29], v[30], v[31], v[32], v[33], v[34], v[35])
-    local okHR, eHR = pcall(updateHeldItem, "R", (flags & 8) ~= 0, v[36], v[37], v[38], v[39], v[40], v[41], v[42])
+    -- Held items stay ON THE HAND: this body's arms are a fixed length, so when the other player's
+    -- controller is further away than the arm reaches (or the IK lags a frame) the hand stops short.
+    -- The item is moved by the same amount the hand missed its target (0.9.1: a gun floated in the
+    -- air beside an outstretched hand).
+    local function onHand(side, o)
+        local x, y, z = v[o], v[o + 1], v[o + 2]
+        local tgt = P["armT" .. side]
+        if tgt then
+            pcall(function()
+                local h = P.mesh:GetSocketLocation(FName("hand_" .. side))
+                local ex, ey, ez = h.X - tgt[1], h.Y - tgt[2], h.Z - tgt[3]
+                if ex * ex + ey * ey + ez * ez > 4 then x, y, z = x + ex, y + ey, z + ez end
+            end)
+        end
+        return x, y, z
+    end
+    local lx, ly, lz = onHand("l", 29)
+    local rx, ry, rz = onHand("r", 36)
+    local okHL, eHL = pcall(updateHeldItem, "L", (flags & 4) ~= 0, lx, ly, lz, v[32], v[33], v[34], v[35])
+    local okHR, eHR = pcall(updateHeldItem, "R", (flags & 8) ~= 0, rx, ry, rz, v[39], v[40], v[41], v[42])
     if (not okHL or not okHR) and frameNo % 300 == 0 then log("held item display error: " .. tostring(eHL) .. " / " .. tostring(eHR)) end
     if selfTest ~= "" and frameNo % 450 == 0 then
         pcall(function()
@@ -1809,8 +1906,20 @@ local function updatePuppet(v)
             local lh = P.mesh:GetSocketLocation(FName("hand_l"))
             local rh = P.mesh:GetSocketLocation(FName("hand_r"))
             local function d(h, t) return t and math.sqrt(dist2(h.X, h.Y, h.Z, t[1], t[2], t[3])) or -1 end
-            log(string.format("arm check (anim graph IK): left hand %.0f cm from its target, right hand %.0f cm | right controller Z %.0f, hand Z %.0f",
-                d(lh, P.armTl), d(rh, P.armTr), v[17], rh.Z))
+            local gun = "-"
+            pcall(function()
+                local h = heldShown.R
+                local g = h and (h.propActor or h.actors[1])
+                if valid(g) then
+                    local gl = g:K2_GetActorLocation()
+                    -- same offset the sender had between controller and item
+                    local sx, sy, sz = v[36] - v[15], v[37] - v[16], v[38] - v[17]
+                    local want = { rh.X + sx, rh.Y + sy, rh.Z + sz }
+                    gun = string.format("%.0f cm", math.sqrt(dist2(gl.X, gl.Y, gl.Z, want[1] + (P.armTr and (v[15] - P.armTr[1]) or 0), want[2] + (P.armTr and (v[16] - P.armTr[2]) or 0), want[3] + (P.armTr and (v[17] - P.armTr[3]) or 0))))
+                end
+            end)
+            log(string.format("arm check (anim graph IK): left hand %.0f cm from its target, right hand %.0f cm | held item off its grip on the hand: %s",
+                d(lh, P.armTl), d(rh, P.armTr), gun))
         end)
     end
     if selfTest ~= "" and frameNo % 450 == 0 and P.pose then
@@ -1881,6 +1990,8 @@ local function resetNpcSync()
     end
     npcIdOf, npcActor, mirrorIdOf, mirrorTarget, nextNpcId = {}, {}, {}, {}, 1
     EX.goneIds = {}
+    for _, r in pairs(EX.remoteDropped or {}) do if valid(r.actor) then pcall(function() r.actor:K2_DestroyActor() end) end end
+    EX.remoteDropped, EX.goneSprops, EX.dropped = {}, {}, {}
 end
 
 -- NPCs are tracked as they are created (NotifyOnNewObject) instead of scanning every object in
@@ -1923,6 +2034,48 @@ local function liveNpcs()
 end
 
 local lastBodySent = {}   -- host: id -> {x,y,z} of the last corpse position sent
+
+-- Dropped / thrown items that exist only in this game (spawned at runtime, so the other game has no
+-- object of that name): streamed on the state channel while they move, then once more at rest. The
+-- other game shows an inert copy of the item's blueprint there. Picked up again or destroyed ->
+-- "spropgone" (reliable) removes the copy.
+EX.dropped, EX.nextDropId = {}, 1
+function EX.trackDropped(actor, class)
+    local name = actor:GetFullName()
+    for _, d in pairs(EX.dropped) do if d.name == name then return end end
+    local n = 0
+    for _ in pairs(EX.dropped) do n = n + 1 end
+    if n >= 32 then return end                      -- keep it cheap: at most 32 loose items
+    local id = EX.nextDropId
+    EX.nextDropId = id + 1
+    EX.dropped[id] = { actor = actor, name = name, class = class, since = frameNo, still = 0 }
+end
+function EX.untrackDropped(name)
+    for id, d in pairs(EX.dropped) do
+        if d.name == name then
+            EX.dropped[id] = nil
+            sendGame("spropgone " .. id)
+        end
+    end
+end
+function EX.droppedTick()
+    if frameNo % 3 ~= 0 then return end
+    for id, d in pairs(EX.dropped) do
+        if not valid(d.actor) then
+            EX.dropped[id] = nil
+            sendGame("spropgone " .. id)
+        elseif not d.rest then
+            local l = d.actor:K2_GetActorLocation()
+            local r = d.actor:K2_GetActorRotation()
+            local qx, qy, qz, qw = rotToQuat(r.Pitch, r.Yaw, r.Roll)
+            local vx, vy, vz = 0, 0, 0
+            pcall(function() local v = d.actor:GetVelocity() vx, vy, vz = v.X, v.Y, v.Z end)
+            d.still = (vx * vx + vy * vy + vz * vz < 9) and d.still + 1 or 0
+            if d.still > 20 or frameNo - d.since > 1800 then d.rest = true end   -- at rest: the last line stays (repeated 3 s)
+            sendState("s" .. id, string.format("sprop %d %s %.1f %.1f %.1f %.4f %.4f %.4f %.4f", id, d.class, l.X, l.Y, l.Z, qx, qy, qz, qw))
+        end
+    end
+end
 
 -- Moving parts of a held item (slide/bolt going back when firing or racking, magazine sliding in,
 -- hammer...) as offsets from the item's main component. Only parts away from their resting offset
@@ -2489,6 +2642,104 @@ function EX.onProp(path, x, y, z, qx, qy, qz, qw, vx, vy, vz)
     end)
 end
 
+-------------------------------------------------------------------------------- world blood (host-authoritative)
+-- The game spawns blood decals with random size, direction and frame, so the same hit left different
+-- blood in each game. Now the host's game decides: it sends every new world blood decal (class,
+-- transform, decal size); the joining game removes the blood decals it made itself and spawns the
+-- host's exact ones. Decals are found with UE4SS NotifyOnNewObject (constructor time) and read one
+-- frame later, once the game has placed them.
+EX.BLOOD_CLASSES = {
+    "/Game/Blood/BP_BT_BloodDecal.BP_BT_BloodDecal_C",
+    "/Game/AnimatedBloodDecals/BP_PoolingDecal.BP_PoolingDecal_C",
+    "/Game/Blood/BP_DirectionalBloodDecal.BP_DirectionalBloodDecal_C",
+    "/Game/Blood/BP_BT_BloodDripDecal.BP_BT_BloodDripDecal_C",
+}
+EX.bloodHooked, EX.newBlood, EX.bloodSent, EX.bloodShown = {}, {}, 0, 0
+function EX.hookBlood()
+    if EX.bloodHooked.all then return end
+    EX.bloodHooked.all = true
+    -- the blood blueprints are only loaded once the first blood appears, so watch their engine base
+    -- class (always loaded) and keep the four blood classes by name
+    EX.BLOOD_INDEX = {}
+    for i, path in ipairs(EX.BLOOD_CLASSES) do EX.BLOOD_INDEX[path:match("%.([^%.]+)$")] = i end
+    local ok, err = pcall(NotifyOnNewObject, "/Script/Engine.DecalActor", function(obj)
+        if EX.spawningBlood or #EX.newBlood >= 256 then return end
+        EX.newBlood[#EX.newBlood + 1] = { obj = obj, at = frameNo }
+    end)
+    log((ok and "watching new decal actors for world blood" or ("could not watch decal actors: " .. tostring(err))))
+end
+function EX.bloodTick()
+    if frameNo % 120 == 0 then pcall(EX.hookBlood) end
+    if #EX.newBlood == 0 then return end
+    local keep = {}
+    local sentNow = 0
+    for _, b in ipairs(EX.newBlood) do
+        if frameNo <= b.at then
+            keep[#keep + 1] = b                                  -- placed by the game next frame
+        elseif valid(b.obj) and not b.cls then
+            pcall(function() b.cls = EX.BLOOD_INDEX[b.obj:GetClass():GetFName():ToString()] end)
+            if b.cls then keep[#keep + 1] = b end                -- a blood decal: handle it next frame
+        elseif valid(b.obj) then
+            if status.role == "host" then
+                if sentNow < 24 then
+                    sentNow = sentNow + 1
+                    pcall(function()
+                        local a = b.obj
+                        local l = a:K2_GetActorLocation()
+                        local r = a:K2_GetActorRotation()
+                        local sc = a:GetActorScale3D()
+                        local ds = { X = 0, Y = 0, Z = 0 }
+                        pcall(function() local d = a.Decal.DecalSize ds = { X = d.X, Y = d.Y, Z = d.Z } end)
+                        sendGame(string.format("blood %d %.1f %.1f %.1f %.2f %.2f %.2f %.3f %.3f %.3f %.1f %.1f %.1f", b.cls,
+                            l.X, l.Y, l.Z, r.Pitch, r.Yaw, r.Roll, sc.X, sc.Y, sc.Z, ds.X, ds.Y, ds.Z))
+                        EX.bloodSent = EX.bloodSent + 1
+                    end)
+                else
+                    keep[#keep + 1] = b                          -- spread bursts over the next frames
+                end
+            else
+                -- joining game: the host's blood replaces ours
+                pcall(function() b.obj:K2_DestroyActor() end)
+            end
+        end
+    end
+    EX.newBlood = keep
+end
+function EX.onBlood(rest)
+    local v = {}
+    for x in rest:gmatch("%S+") do v[#v + 1] = tonumber(x) end
+    if #v < 13 then return end
+    local path = EX.BLOOD_CLASSES[v[1]]
+    if not path then return end
+    local cl = StaticFindObject(path)
+    if not valid(cl) then
+        local pkg = path:match("^(.-)%.") or path
+        for _, what in ipairs({ path, pkg .. "." .. (pkg:match("([^/]+)$") or ""), pkg }) do
+            if valid(StaticFindObject(path)) then break end
+            pcall(LoadAsset, what)
+        end
+        cl = StaticFindObject(path)
+    end
+    local world = getWorld()
+    local gs = UEHelpers.GetGameplayStatics()
+    if not (valid(cl) and valid(world) and valid(gs)) then
+        if not EX.bloodFailLogged then EX.bloodFailLogged = true log("blood from the other game not shown: class " .. path .. " loaded " .. tostring(valid(cl))) end
+        return
+    end
+    local qx, qy, qz, qw = rotToQuat(v[5], v[6], v[7])
+    local t = { Rotation = { X = qx, Y = qy, Z = qz, W = qw }, Translation = { X = v[2], Y = v[3], Z = v[4] }, Scale3D = { X = v[8], Y = v[9], Z = v[10] } }
+    EX.spawningBlood = true
+    pcall(function()
+        local a = gs:BeginDeferredActorSpawnFromClass(world, cl, t, 1, nil)
+        if valid(a) then
+            if v[11] > 0 then pcall(function() a.Decal.DecalSize = { X = v[11], Y = v[12], Z = v[13] } end) end
+            gs:FinishSpawningActor(a, t)
+            EX.bloodShown = EX.bloodShown + 1
+        end
+    end)
+    EX.spawningBlood = false
+end
+
 -- A player (re)connected: everything that is only sent when it changes is sent again, so a late
 -- joiner sees what is already going on - the item in your hands, its moving parts, every corpse
 -- (death + pose), map objects that were moved, your health and look.
@@ -2501,6 +2752,7 @@ function EX.onPeerJoined()
     end
     lastBodySent = {}
     EX.hpSent, EX.lookSentAt = nil, nil
+    for _, d in pairs(EX.dropped or {}) do d.rest, d.still, d.since = nil, 0, frameNo end
     for path, _ in pairs(EX.propSent or {}) do
         local a = EX.propCache[path]
         if not valid(a) then a = StaticFindObject(path) end
@@ -2524,6 +2776,12 @@ function EX.tick()
     if not syncActive() then return end
     local ok, err = pcall(EX.grabTick)
     if not ok and frameNo % 300 == 0 then log("grab sync error: " .. tostring(err)) end
+    local okB, errB = pcall(EX.bloodTick)
+    if not okB and frameNo % 300 == 0 then log("blood sync error: " .. tostring(errB)) end
+    if selfTest ~= "" and frameNo % 600 == 0 then log(string.format("blood: %d sent, %d shown from the other game", EX.bloodSent, EX.bloodShown)) end
+    local okD, errD = pcall(EX.droppedTick)
+    if not okD and frameNo % 300 == 0 then log("dropped item sync error: " .. tostring(errD)) end
+    pcall(EX.remoteDroppedTick)
     pcall(EX.remoteGrabTick)
     ok, err = pcall(EX.propTick)
     if not ok and frameNo % 300 == 0 then log("prop sync error: " .. tostring(err)) end
@@ -3831,6 +4089,34 @@ local function handleGame(line)
             local old = remoteHeld[side]
             remoteHeld[side] = { ver = old.ver + 1, n = tonumber(n), ms = tonumber(ms) or 1, parts = {}, class = EX.pendingClass[side], serial = tonumber(serial) }
         end
+    elseif kind == "blood" then
+        if status.role == "client" then
+            local okB, errB = pcall(EX.onBlood, rest)
+            if not okB then log("blood from the other game failed: " .. tostring(errB)) end
+        end
+    elseif kind == "sprop" then
+        -- sprop <id> <class> x y z qx qy qz qw: an item the other player dropped or threw
+        local id, class, x, y, z, qx, qy, qz, qw = rest:match("^(%d+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+) (%S+)")
+        id = tonumber(id or "")
+        if id and class:sub(1, 6) == "/Game/" and not (EX.goneSprops and EX.goneSprops[id]) then
+            EX.remoteDropped = EX.remoteDropped or {}
+            local r = EX.remoteDropped[id] or { class = class }
+            r.tx, r.ty, r.tz = tonumber(x), tonumber(y), tonumber(z)
+            r.tq = { tonumber(qx), tonumber(qy), tonumber(qz), tonumber(qw) }
+            EX.remoteDropped[id] = r
+        end
+    elseif kind == "spropgone" then
+        local id = tonumber(rest)
+        if id then
+            EX.goneSprops = EX.goneSprops or {}
+            EX.goneSprops[id] = true
+            local r = EX.remoteDropped and EX.remoteDropped[id]
+            if r and valid(r.actor) then
+                if selfTest ~= "" then pcall(function() local l = r.actor:K2_GetActorLocation() log(string.format("dropped item %d removed (it was at %.0f, %.0f, %.0f)", id, l.X, l.Y, l.Z)) end) end
+                pcall(function() r.actor:K2_DestroyActor() end)
+            end
+            if EX.remoteDropped then EX.remoteDropped[id] = nil end
+        end
     elseif kind == "heldprop" then
         -- heldprop <L|R> <map object path> <serial>: the other player holds this map object
         local side, path, serial = rest:match("^([LR]) (%S+) (%d+)")
@@ -4216,6 +4502,8 @@ local function frame()
     end
     for i = 1, #outbox do req[#req + 1] = outbox[i] end
     outbox = {}
+    for i = 1, #logQueue do req[#req + 1] = logQueue[i] end
+    logQueue = {}
     for i = 1, #EX.cmds do req[#req + 1] = EX.cmds[i] end
     EX.cmds = {}
     pcall(EX.fxTick)

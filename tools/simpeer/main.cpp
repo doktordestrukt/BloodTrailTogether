@@ -90,7 +90,9 @@ int main(int argc, char** argv) {
   std::string hold_class;  // --hold-class <blueprint class path>: sent first, like the game does
   std::string hold_mesh;  // --hold <skeletal mesh path>: "hold" it in the right hand like a gun
   bool hold_sent = false;
-  bool slide_test = false;  // --slide: two-part held item whose second part moves like a pistol slide
+  bool slide_test = false;
+  std::string drop_class;  // --drop <class>: at 20 s drop an item that falls 1.5 m, "picked up" again at 40 s
+  bool drop_gone_sent = false;  // --slide: two-part held item whose second part moves like a pistol slide
   double last_npc = 0, connected_at = -1;
   ImpairmentParams imp;
   double seconds = 0;
@@ -110,6 +112,7 @@ int main(int argc, char** argv) {
     else if (a == "--game") game_line = next();
     else if (a == "--fake-npc") fake_npc = true;
     else if (a == "--slide") slide_test = true;
+    else if (a == "--drop") drop_class = next();
     else if (a == "--npc-pose") npc_pose_arg = next();
     else if (a == "--hold") hold_mesh = next();
     else if (a == "--hold-class") hold_class = next();
@@ -257,6 +260,22 @@ int main(int argc, char** argv) {
         snprintf(b, sizeof(b), "npc 1 %.1f %.1f 92.0 180.0 0 %.0f 0 %d %d%s%s", x, y, vy, stance, down ? 1 : 0, down ? " " : "", down ? pose : "");
       }
       ses.send_state("n1", b);
+    }
+    if (!drop_class.empty() && ses.state() == SessionState::Connected) {
+      double t = now - start;
+      if (t > 20 && t < 40) {
+        double z = std::max(5.0, 150.0 - 150.0 * (t - 20) * (t - 20) * 4.9 / 1.5);
+        char b[400];
+        snprintf(b, sizeof(b), "sprop 1 %s 250.0 80.0 %.1f 0 0 0 1", drop_class.c_str(), z);
+        ses.send_state("s1", b);
+      } else if (t >= 40 && !drop_gone_sent) {
+        NetEvent g;
+        g.type = EventType::Game;
+        g.s1 = "spropgone 1";
+        ses.send_event(g);
+        drop_gone_sent = true;
+        BTT_INFO("dropped item picked up again");
+      }
     }
     if (!game_line.empty() && ses.state() == SessionState::Connected && now - last_game > 10.0 && now - start > 15.0) {
       last_game = now;

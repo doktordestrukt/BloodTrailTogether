@@ -570,6 +570,22 @@ void draw_char_panel(Graphics& g, double t) {
   g.ResetTransform();
 }
 
+float g_view_scale = 1.0f, g_view_x = 0.0f, g_view_y = 0.0f;
+// window (client) pixel -> panel layout coordinates
+void to_layout(LPARAM l, int& x, int& y) {
+  x = (int)((GET_X_LPARAM(l) - g_view_x) / g_view_scale);
+  y = (int)((GET_Y_LPARAM(l) - g_view_y) / g_view_scale);
+}
+// keep the text boxes on their spot of the scaled panel
+void place_edits() {
+  auto put = [](HWND e, int x, int y, int w, int h) {
+    if (!e) return;
+    MoveWindow(e, (int)(g_view_x + x * g_view_scale), (int)(g_view_y + y * g_view_scale), (int)(w * g_view_scale), (int)(h * g_view_scale), TRUE);
+  };
+  put(g_name, 142, 195, 200, 22);
+  put(g_outfit_edit, 288, 525, 152, 22);
+}
+
 void draw(HDC dc) {
   App& a = app();
   EngineSnapshot s = a.engine->snapshot();
@@ -750,8 +766,23 @@ void draw(HDC dc) {
     g.FillRectangle(&fade, 0, 0, W, H);
   }
 
+  // The panel is laid out at W x H and scaled to the window (resizable, maximisable), keeping its
+  // proportions and centred; mouse positions are mapped back with to_layout().
+  RECT cr{};
+  GetClientRect(g_wnd, &cr);
+  int cw = std::max(1L, cr.right - cr.left), ch = std::max(1L, cr.bottom - cr.top);
+  g_view_scale = std::min(cw / (float)W, ch / (float)H);
+  g_view_x = (cw - W * g_view_scale) * 0.5f;
+  g_view_y = (ch - H * g_view_scale) * 0.5f;
   Graphics screen(dc);
-  screen.DrawImage(&bmp, 0, 0);
+  if (cw != W || ch != H) {
+    SolidBrush edge(rgba(9, 8, 8));
+    screen.FillRectangle(&edge, 0, 0, cw, ch);
+    screen.SetInterpolationMode(g_view_scale >= 1.0f ? InterpolationModeHighQualityBilinear : InterpolationModeHighQualityBicubic);
+    screen.DrawImage(&bmp, g_view_x, g_view_y, W * g_view_scale, H * g_view_scale);
+  } else {
+    screen.DrawImage(&bmp, 0, 0);
+  }
 }
 
 std::atomic<bool> g_quick_join{false};
@@ -936,8 +967,7 @@ LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
       app().engine->notify_local("Looking for an open game...");
       return 0;
     case WM_MOUSEMOVE: {
-      g_mouse_x = GET_X_LPARAM(l);
-      g_mouse_y = GET_Y_LPARAM(l);
+      to_layout(l, g_mouse_x, g_mouse_y);
       if (g_dragging) {
         app().char_yaw = fmodf(app().char_yaw + (g_mouse_x - g_drag_x) * 0.6f + 360.0f, 360.0f);
         g_drag_x = g_mouse_x;
@@ -958,18 +988,41 @@ LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
       g_mouse_down = true;
       SetCapture(h);
       SetFocus(h);
-      if (g_char_open && inside(kPreview, GET_X_LPARAM(l), GET_Y_LPARAM(l))) {
+      int lx, ly;
+      to_layout(l, lx, ly);
+      if (g_char_open && inside(kPreview, lx, ly)) {
         g_dragging = true;
-        g_drag_x = GET_X_LPARAM(l);
+        g_drag_x = lx;
         g_last_drag = now_sec();
       }
       return 0;
-    case WM_LBUTTONUP:
-      if (g_mouse_down && !g_dragging) click(GET_X_LPARAM(l), GET_Y_LPARAM(l));
+    case WM_LBUTTONUP: {
+      int lx, ly;
+      to_layout(l, lx, ly);
+      if (g_mouse_down && !g_dragging) click(lx, ly);
       g_mouse_down = false;
       g_dragging = false;
       ReleaseCapture();
       return 0;
+    }
+    case WM_SIZE: {
+      // recompute the scale now (the next paint would be one frame late for the text boxes)
+      RECT cr{};
+      GetClientRect(h, &cr);
+      int cw = std::max(1L, cr.right - cr.left), ch = std::max(1L, cr.bottom - cr.top);
+      g_view_scale = std::min(cw / (float)W, ch / (float)H);
+      g_view_x = (cw - W * g_view_scale) * 0.5f;
+      g_view_y = (ch - H * g_view_scale) * 0.5f;
+      place_edits();
+      InvalidateRect(h, nullptr, FALSE);
+      return 0;
+    }
+    case WM_GETMINMAXINFO: {
+      auto* mm = (MINMAXINFO*)l;
+      mm->ptMinTrackSize.x = W / 2;
+      mm->ptMinTrackSize.y = H / 2;
+      return 0;
+    }
     case WM_MOUSEWHEEL:
       if (g_char_open) g_outfit_scroll -= GET_WHEEL_DELTA_WPARAM(w) / 120.0f * 28.0f;
       else g_scroll_target -= GET_WHEEL_DELTA_WPARAM(w) / 120.0f * 52.0f;
@@ -1009,9 +1062,9 @@ DWORD WINAPI ui_thread(LPVOID) {
   RegisterClassW(&wc);
 
   RECT r{0, 0, W, H};
-  DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+  DWORD style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;   // title bar, minimise, maximise, resizable border
   AdjustWindowRect(&r, style, FALSE);
-  g_wnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, wc.lpszClassName, L"BloodTrail Together", style, 40, 40,
+  g_wnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_APPWINDOW, wc.lpszClassName, L"BloodTrail Together", style, 40, 40,
                           r.right - r.left, r.bottom - r.top, nullptr, nullptr, wc.hInstance, nullptr);
   g_name = CreateWindowExW(0, L"EDIT", to_wide(app().settings.player_name).c_str(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                            142, 195, 200, 22, g_wnd, (HMENU)(INT_PTR)ID_NAME, nullptr, nullptr);
